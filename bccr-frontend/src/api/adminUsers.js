@@ -4,7 +4,8 @@ import { request } from './client'
  * 管理员用户操作 — 与 {@code UserController} {@code /api/user} 对齐
  *
  * 已有：
- * - GET    /api/user/list?page=&size=&keyword=
+ * - GET    /api/user/list?pageNum=&pageSize=&userId=&username=&startTime=&endTime=
+ *   （注册时间筛选：startTime/endTime 传日期 yyyy-MM-dd，后端拼接 00:00:00 / 23:59:59）
  * - PUT    /api/user/{userId}/enable
  * - PUT    /api/user/{userId}/disable
  * - PUT    /api/user/{userId}/role           — body: RoleRequest，如 { "role": "auditor" }
@@ -49,29 +50,54 @@ export function normalizeAdminUserPage(data) {
   }
   const d = /** @type {Record<string, unknown>} */ (data)
   const total = Number(d.total ?? d.totalElements ?? list.length) || list.length
-  let size = Number(d.size ?? d.pageSize ?? 10) || 10
+  let size = Number(d.pageSize ?? d.size ?? 10) || 10
   if (size > 50) size = 50
   if (size < 1) size = 10
   let page = 1
-  if (d.current != null) page = Number(d.current) || 1
+  if (d.pageNum != null) page = Number(d.pageNum) || 1
+  else if (d.current != null) page = Number(d.current) || 1
   else if (typeof d.number === 'number') page = d.number + 1
   else if (d.page != null) page = Number(d.page) || 1
-  const pages = total === 0 ? 0 : Math.ceil(total / size)
+  const pages =
+    Number(d.pages) ||
+    (total === 0 ? 0 : Math.ceil(total / size))
   return { records: list, total, page, size, pages }
 }
 
 /**
- * @param {{ page?: number, size?: number, keyword?: string }} [params]
+ * 管理员用户分页列表（与后端 pageNum、pageSize、条件参数一致）
+ * @param {{
+ *   pageNum?: number,
+ *   pageSize?: number,
+ *   page?: number,
+ *   size?: number,
+ *   userId?: string,
+ *   username?: string,
+ *   startTime?: string,
+ *   endTime?: string,
+ * }} [params]
  */
 export function fetchAdminUserList(params = {}) {
-  const page = Math.max(1, Number(params.page) || 1)
-  const size = Math.min(50, Math.max(1, Number(params.size) || 10))
+  const pageNum = Math.max(1, Number(params.pageNum ?? params.page) || 1)
+  const pageSize = Math.min(50, Math.max(1, Number(params.pageSize ?? params.size) || 10))
   const q = new URLSearchParams()
-  q.set('page', String(page))
-  q.set('size', String(size))
-  if (params.keyword != null && String(params.keyword).trim() !== '') {
-    q.set('keyword', String(params.keyword).trim())
+  q.set('pageNum', String(pageNum))
+  q.set('pageSize', String(pageSize))
+  const userId = params.userId != null ? String(params.userId).trim() : ''
+  const username = params.username != null ? String(params.username).trim() : ''
+  const startTime = params.startTime != null ? String(params.startTime).trim() : ''
+  const endTime = params.endTime != null ? String(params.endTime).trim() : ''
+  if (userId) {
+    q.set('userId', userId)
+    // 部分后端使用 id 作为查询参数名，多传一项一般会被忽略；若你的接口只认 id，可删掉 userId 仅保留 id
+    q.set('id', userId)
   }
+  if (username) {
+    q.set('username', username)
+    q.set('loginName', username)
+  }
+  if (startTime) q.set('startTime', startTime)
+  if (endTime) q.set('endTime', endTime)
   return request(`/api/user/list?${q.toString()}`, { method: 'GET' })
 }
 

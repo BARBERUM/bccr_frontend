@@ -5,6 +5,7 @@ import { fetchTextFromUrl } from '@/api/client'
 import * as reportApi from '@/api/report'
 import * as workApi from '@/api/work'
 import { useAuthStore } from '@/stores/auth'
+import WorkInteractionPanel from '@/views/works/WorkInteractionPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -33,7 +34,7 @@ const REPORT_REASONS = [
   { value: 'OTHER', label: '其他' },
 ]
 
-const workId = computed(() => String(route.params.workId || ''))
+const workId = computed(() => workApi.normalizeWorkIdParam(String(route.params.workId || '')))
 
 const imageMainSrc = computed(() => {
   const d = detail.value
@@ -80,6 +81,8 @@ async function load() {
   errorMsg.value = ''
   textBody.value = ''
   textBodyError.value = ''
+  onChainData.value = null
+  onChainErr.value = ''
   try {
     const raw = await workApi.fetchWorkDetail(id)
     detail.value = workApi.formatWorkDetail(
@@ -112,7 +115,104 @@ function formatType(t) {
   return map[t] ?? t
 }
 
+const onChainLoading = ref(false)
+const onChainErr = ref('')
+/** @type {import('vue').Ref<Record<string, unknown> | null>} */
+const onChainData = ref(null)
+
+const ONCHAIN_LABELS = {
+  fingerprint: '指纹',
+  workId: '作品 ID',
+  workName: '作品名称',
+  title: '标题',
+  authorAddress: '作者地址',
+  author: '作者',
+  hash: '哈希',
+  txHash: '交易哈希',
+  transactionHash: '交易哈希',
+  blockNumber: '区块号',
+  chainId: '链 ID',
+  timestamp: '时间戳',
+  createTime: '创建时间',
+  createdAt: '创建时间',
+  blockHash: '区块哈希',
+  contractAddress: '合约地址',
+  contentHash: '内容哈希',
+  owner: '所有者',
+  ownerAddress: '所有者地址',
+  uri: 'URI',
+  tokenId: 'Token ID',
+}
+
+/** @param {string} k */
+function labelOnChainField(k) {
+  return ONCHAIN_LABELS[k] ?? k
+}
+
+/** @param {Record<string, unknown>} obj */
+function flattenWorkInfoForDl(obj) {
+  const rows = []
+  for (const [k, v] of Object.entries(obj)) {
+    if (v == null || v === '') continue
+    let display
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      display = JSON.stringify(v)
+    } else if (Array.isArray(v)) {
+      display = v
+        .map((x) => (typeof x === 'object' && x !== null ? JSON.stringify(x) : String(x)))
+        .join('\n')
+    } else {
+      display = String(v)
+    }
+    rows.push({ key: k, label: labelOnChainField(k), value: display })
+  }
+  return rows
+}
+
+const onChainRows = computed(() => {
+  const d = onChainData.value
+  if (!d || typeof d !== 'object') return []
+  return flattenWorkInfoForDl(/** @type {Record<string, unknown>} */ (d))
+})
+
+async function refreshOnChain() {
+  const fp = String(detail.value?.fingerprint ?? '').trim()
+  if (!fp) {
+    onChainErr.value = '暂无指纹，无法查询链上记录'
+    onChainData.value = null
+    return
+  }
+  onChainLoading.value = true
+  onChainErr.value = ''
+  try {
+    const raw = await workApi.fetchWorkOnChainByFingerprint(fp)
+    onChainData.value =
+      raw && typeof raw === 'object' ? /** @type {Record<string, unknown>} */ (raw) : {}
+  } catch (e) {
+    onChainErr.value = e?.message || '链上查询失败'
+    onChainData.value = null
+  } finally {
+    onChainLoading.value = false
+  }
+}
+
+watch(
+  () => detail.value?.fingerprint,
+  (fp) => {
+    onChainData.value = null
+    onChainErr.value = ''
+    const s = String(fp ?? '').trim()
+    if (!s) return
+    void refreshOnChain()
+  },
+)
+
 function goBack() {
+  // 从审核、查重等子页 push 进入时，应回到来源页，而非固定去作品广场
+  if (typeof window !== 'undefined' && window.history.length > 1) {
+    router.back()
+    return
+  }
   router.push({ name: 'works-square' })
 }
 
@@ -165,8 +265,7 @@ async function submitReport() {
         reportErr.value = '不能举报自己的作品'
         return
       }
-      reportErr.value =
-        '未找到举报接口（404）。若为本人作品请勿举报；否则请确认 POST /api/audit/{workId}/report'
+      reportErr.value = '暂无法提交举报。本人作品无法举报；若确需举报请联系管理员或稍后再试。'
       return
     }
     reportErr.value = e?.message || '提交失败'
@@ -189,15 +288,7 @@ function normId(v) {
 function rawMarksCurrentUserOwn(raw) {
   if (!raw || typeof raw !== 'object') return false
   const o = /** @type {Record<string, unknown>} */ (raw)
-  const keys = [
-    'mine',
-    'isMine',
-    'selfOwned',
-    'isOwner',
-    'ownWork',
-    'self',
-    'currentUserWork',
-  ]
+  const keys = ['mine', 'isMine', 'selfOwned', 'isOwner', 'ownWork', 'currentUserWork']
   for (const k of keys) {
     const v = o[k]
     if (v === true) return true
@@ -212,89 +303,26 @@ function rawMarksCurrentUserOwn(raw) {
  * @param {string} authorFromSummary formatWorkSummary 的 author
  * @param {unknown} user
  */
+/** @param {unknown} v */
+function normChainAddress(v) {
+  const s = String(v ?? '').trim()
+  if (!/^0x[0-9a-fA-F]{40}$/.test(s)) return ''
+  return s.toLowerCase()
+}
+
 function authorAddressMatchesBlockchain(raw, authorFromSummary, user) {
   if (!user || typeof user !== 'object') return false
   const u = /** @type {Record<string, unknown>} */ (user)
-  const chain = normId(u.blockchainAddress ?? u.blockChainAddress)
+  const chain = normChainAddress(u.blockchainAddress ?? u.blockChainAddress)
   if (!chain) return false
-  const workAddr = normId(
-    raw.authorAddress ?? raw.author ?? authorFromSummary,
-  )
+  const workAddr =
+    normChainAddress(raw.authorAddress) ||
+    normChainAddress(raw.author) ||
+    normChainAddress(authorFromSummary)
   return Boolean(workAddr && workAddr === chain)
 }
 
-/** @param {Record<string, unknown>} u */
-function collectUserIdentityHints(u) {
-  const hints = /** @type {Set<string>} */ (new Set())
-  const keys = [
-    'id',
-    'userId',
-    'uid',
-    'blockchainAddress',
-    'blockChainAddress',
-    'authorAddress',
-    'walletAddress',
-    'address',
-    'chainAddress',
-    'ethereumAddress',
-    'username',
-    'loginName',
-    'account',
-    'nickname',
-    'nickName',
-    'name',
-    'wallet',
-    'publicKey',
-    'email',
-  ]
-  for (const k of keys) {
-    const n = normId(u[k])
-    if (n) hints.add(n)
-  }
-  return hints
-}
-
-/** @param {Record<string, unknown>} raw */
-function collectWorkOwnerHints(raw) {
-  const hints = /** @type {Set<string>} */ (new Set())
-  const keys = [
-    'authorAddress',
-    'author',
-    'authorName',
-    'ownerAddress',
-    'userAddress',
-    'walletAddress',
-    'ownerId',
-    'userId',
-    'creatorId',
-    'authorId',
-    'uid',
-    'registerUserId',
-    'createUserId',
-    'submitterId',
-    'publisherId',
-    'createdBy',
-    'createBy',
-    'userName',
-    'username',
-    'creatorName',
-  ]
-  for (const k of keys) {
-    const n = normId(raw[k])
-    if (n) hints.add(n)
-  }
-  const nested = raw.user ?? raw.owner ?? raw.creator
-  if (nested && typeof nested === 'object') {
-    for (const h of collectUserIdentityHints(
-      /** @type {Record<string, unknown>} */ (nested),
-    )) {
-      hints.add(h)
-    }
-  }
-  return hints
-}
-
-/** 当前登录用户是否为作品登记作者（优先：authorAddress ↔ blockchainAddress） */
+/** 当前登录用户是否为作品登记作者（链上地址 / 用户 ID / 接口 mine 标记） */
 const isOwnWork = computed(() => {
   const d = detail.value
   const u = auth.user
@@ -305,24 +333,62 @@ const isOwnWork = computed(() => {
       : {}
   if (authorAddressMatchesBlockchain(raw, d.author, u)) return true
   if (rawMarksCurrentUserOwn(raw)) return true
-  const workHints = collectWorkOwnerHints(raw)
-  const a = normId(d.author)
-  if (a) workHints.add(a)
 
-  const userHints = collectUserIdentityHints(
-    /** @type {Record<string, unknown>} */ (u),
+  const uid = normId(
+    /** @type {Record<string, unknown>} */ (u).id ??
+      /** @type {Record<string, unknown>} */ (u).userId,
   )
-  for (const h of workHints) {
-    if (userHints.has(h)) return true
+  if (!uid) return false
+
+  const ownerIds = [
+    raw.userId,
+    raw.ownerId,
+    raw.creatorId,
+    raw.authorId,
+    raw.registerUserId,
+    raw.createUserId,
+    raw.submitterId,
+    raw.publisherId,
+    raw.createdBy,
+    raw.createBy,
+  ]
+  for (const id of ownerIds) {
+    if (uid === normId(id)) return true
   }
+
+  const nested = raw.user ?? raw.owner ?? raw.creator
+  if (nested && typeof nested === 'object') {
+    const nestedId = normId(
+      /** @type {Record<string, unknown>} */ (nested).id ??
+        /** @type {Record<string, unknown>} */ (nested).userId,
+    )
+    if (nestedId && nestedId === uid) return true
+  }
+
   return false
 })
+
+/** 是否展示举报入口（有详情即展示；本人作品为禁用态） */
+const showReportButton = computed(() => Boolean(detail.value))
 
 const showHeroThumb = computed(() => {
   const d = detail.value
   if (!d) return false
   if (d.kind === 'image' && imageMainSrc.value) return false
   return Boolean(d.cover)
+})
+
+/** 作者展示名：优先 authorName，其次非链上地址形态的 author 字段 */
+const displayAuthorName = computed(() => {
+  const d = detail.value
+  if (!d) return ''
+  const n = String(d.authorName || '').trim()
+  if (n) return n
+  const a = String(d.author || '').trim()
+  if (!a) return ''
+  if (/^0x[0-9a-fA-F]{40}$/i.test(a)) return ''
+  if (/^[0-9a-f]{64}$/i.test(a)) return ''
+  return a
 })
 
 onMounted(load)
@@ -335,107 +401,158 @@ watch(isOwnWork, (own) => {
 </script>
 
 <template>
-  <div class="detail">
-    <header class="head">
-      <div class="head-row">
-        <button type="button" class="back" @click="goBack">← 返回广场</button>
-        <button
-          v-if="detail && !isOwnWork"
-          type="button"
-          class="btn-report"
-          @click="openReport"
-        >
-          举报
-        </button>
-      </div>
-    </header>
-
-    <p v-if="loading" class="muted">加载中…</p>
-    <p v-else-if="errorMsg" class="err">{{ errorMsg }}</p>
-
-    <template v-else-if="detail">
-      <section v-if="showImageViewer" class="viewer">
-        <div class="viewer-frame">
-          <img class="viewer-img" :src="imageMainSrc" :alt="detail.title" />
+  <div class="page-shell bccr-scroll-slim">
+    <div class="detail-page">
+      <header class="head">
+        <div class="head-row">
+          <button type="button" class="back" @click="goBack">← 返回</button>
         </div>
-        <p v-if="openFileHref" class="viewer-actions">
-          <a
-            :href="openFileHref"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="link-open"
-          >
-            在新标签页打开作品文件
-          </a>
-        </p>
-      </section>
+      </header>
 
-      <p
-        v-else-if="detail.kind === 'image' && !imageMainSrc"
-        class="warn-banner"
-      >
-        当前作品为图像类型，但接口未返回可访问的图片地址，无法预览。
-      </p>
+      <p v-if="loading" class="muted state-msg">加载中…</p>
+      <p v-else-if="errorMsg" class="err state-msg">{{ errorMsg }}</p>
 
-      <section v-if="detail.kind === 'text'" class="panel text-panel">
-        <h2 class="h2">正文</h2>
-        <p class="text-hint">
-          根据详情中的文件地址请求正文；若与前端不同源请配置 CORS；需要鉴权时已自动附带 Token。
-        </p>
-        <p v-if="textBodyLoading" class="muted">正在加载文本…</p>
-        <p v-else-if="!textSourceUrl" class="warn-banner soft">
-          未返回可访问的 filePath / fileUrl，无法加载正文。
-        </p>
-        <p v-else-if="textBodyError" class="err">{{ textBodyError }}</p>
-        <pre v-else class="text-body">{{ textBody }}</pre>
-        <p v-if="textSourceUrl" class="text-foot">
-          <a
-            :href="textSourceUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="link"
-          >
-            在新标签页打开原文件
-          </a>
-        </p>
-      </section>
+      <template v-else-if="detail">
+        <div class="detail-ig">
+          <aside class="ig-media">
+            <div v-if="showImageViewer" class="media-shell">
+              <div class="media-frame">
+                <img class="media-img" :src="imageMainSrc" :alt="detail.title" />
+              </div>
+              <p v-if="openFileHref" class="media-foot">
+                <a
+                  :href="openFileHref"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="link-open"
+                >
+                  在新标签页打开作品文件
+                </a>
+              </p>
+            </div>
 
-      <section class="hero" :class="{ 'hero--full': showImageViewer }">
-        <div v-if="showHeroThumb" class="cover">
-          <img :src="detail.cover" alt="" />
+            <p v-else-if="detail.kind === 'image' && !imageMainSrc" class="warn-banner">
+              当前作品为图像类型，但接口未返回可访问的图片地址，无法预览。
+            </p>
+
+            <div v-else-if="detail.kind === 'text'" class="text-panel-embed">
+              <h3 class="ig-text-h">正文</h3>
+              <p class="text-hint">
+                根据详情中的文件地址请求正文；若与前端不同源请配置 CORS；需要鉴权时已自动附带 Token。
+              </p>
+              <p v-if="textBodyLoading" class="muted">正在加载文本…</p>
+              <p v-else-if="!textSourceUrl" class="warn-banner soft">
+                未返回可访问的 filePath / fileUrl，无法加载正文。
+              </p>
+              <p v-else-if="textBodyError" class="err">{{ textBodyError }}</p>
+              <pre
+                v-else
+                class="text-body text-body--embed bccr-scroll-slim"
+              >{{ textBody }}</pre>
+              <p v-if="textSourceUrl" class="text-foot">
+                <a
+                  :href="textSourceUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="link"
+                >
+                  在新标签页打开原文件
+                </a>
+              </p>
+            </div>
+
+            <div v-else-if="showHeroThumb" class="media-shell">
+              <div class="media-frame">
+                <img class="media-img" :src="detail.cover" alt="" />
+              </div>
+            </div>
+
+            <div v-else class="media-ph" aria-hidden="true">
+              <span class="media-ph-letter">{{ formatType(detail.type).charAt(0) || '作' }}</span>
+            </div>
+          </aside>
+
+          <main class="ig-rail">
+            <div class="rail-inner bccr-scroll-slim">
+              <header class="rail-head">
+                <div class="rail-head-top">
+                  <h1 class="rail-title">{{ detail.title }}</h1>
+                  <button
+                    v-if="showReportButton"
+                    type="button"
+                    class="btn-report"
+                    :class="{ 'is-disabled': isOwnWork }"
+                    :disabled="isOwnWork"
+                    :title="isOwnWork ? '不能举报自己的作品' : '举报该作品'"
+                    @click="openReport"
+                  >
+                    举报
+                  </button>
+                </div>
+                <p class="rail-author">
+                  <span class="rail-author-lbl">作者</span>
+                  <span class="rail-author-name">{{ displayAuthorName || '—' }}</span>
+                </p>
+                <div class="rail-pills">
+                  <span class="pill">{{ formatType(detail.type) }}</span>
+                  <span v-if="detail.status" class="pill soft">{{ detail.status }}</span>
+                </div>
+                <p class="rail-id muted-sm">作品 ID · {{ detail.id }}</p>
+              </header>
+
+              <section class="rail-sec panel-tight">
+                <h2 class="rail-h2">登记信息</h2>
+                <dl class="dl dl-compact">
+                  <dt>作者名称</dt>
+                  <dd>{{ displayAuthorName || '—' }}</dd>
+                  <dt>作者地址</dt>
+                  <dd class="mono">{{ detail.author || '—' }}</dd>
+                  <dt>指纹</dt>
+                  <dd class="mono wrap">{{ detail.fingerprint || '—' }}</dd>
+                  <dt>登记时间</dt>
+                  <dd>{{ formatTime(detail.createdAt) }}</dd>
+                  <dt v-if="detail.fileUrl">文件地址</dt>
+                  <dd v-if="detail.fileUrl">
+                    <a :href="detail.fileUrl" target="_blank" rel="noopener noreferrer" class="link">
+                      {{ detail.fileUrl }}
+                    </a>
+                  </dd>
+                </dl>
+              </section>
+
+              <section v-if="detail.fingerprint" class="rail-sec panel-tight onchain-sec">
+                <div class="onchain-head">
+                  <h2 class="rail-h2">链上原始凭证</h2>
+                  <button
+                    type="button"
+                    class="btn-onchain"
+                    :disabled="onChainLoading"
+                    @click="refreshOnChain"
+                  >
+                    {{ onChainLoading ? '查询中…' : '刷新链上数据' }}
+                  </button>
+                </div>
+                <p v-if="onChainErr" class="err onchain-msg">{{ onChainErr }}</p>
+                <p v-else-if="onChainLoading && !onChainData" class="muted onchain-msg">
+                  正在向节点查询链上记录…
+                </p>
+                <dl v-else-if="onChainRows.length" class="dl dl-compact onchain-dl">
+                  <template v-for="row in onChainRows" :key="row.key">
+                    <dt>{{ row.label }}</dt>
+                    <dd class="mono wrap">{{ row.value }}</dd>
+                  </template>
+                </dl>
+                <p v-else class="muted onchain-msg">接口未返回可展示字段</p>
+              </section>
+
+              <p v-if="detail.description" class="rail-desc">{{ detail.description }}</p>
+
+              <WorkInteractionPanel :work-id="workId" embed />
+            </div>
+          </main>
         </div>
-        <div v-else-if="detail.kind !== 'image' || !imageMainSrc" class="cover">
-          <div class="cover-ph">{{ formatType(detail.type).charAt(0) || '作' }}</div>
-        </div>
-        <div class="hero-text">
-          <h1 class="title">{{ detail.title }}</h1>
-          <p class="line">
-            <span class="pill">{{ formatType(detail.type) }}</span>
-            <span v-if="detail.status" class="pill soft">{{ detail.status }}</span>
-          </p>
-          <p class="line muted-sm">作品 ID · {{ detail.id }}</p>
-          <p v-if="detail.description" class="desc">{{ detail.description }}</p>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2 class="h2">链上与作者</h2>
-        <dl class="dl">
-          <dt>作者地址</dt>
-          <dd class="mono">{{ detail.author || '—' }}</dd>
-          <dt>指纹</dt>
-          <dd class="mono wrap">{{ detail.fingerprint || '—' }}</dd>
-          <dt>登记时间</dt>
-          <dd>{{ formatTime(detail.createdAt) }}</dd>
-          <dt v-if="detail.fileUrl">文件地址</dt>
-          <dd v-if="detail.fileUrl">
-            <a :href="detail.fileUrl" target="_blank" rel="noopener noreferrer" class="link">
-              {{ detail.fileUrl }}
-            </a>
-          </dd>
-        </dl>
-      </section>
-    </template>
+      </template>
+    </div>
 
     <Teleport to="body">
       <div
@@ -496,12 +613,43 @@ watch(isOwnWork, (own) => {
 </template>
 
 <style scoped>
-.detail {
-  max-width: 880px;
+.page-shell {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0.25rem 0 0.35rem;
+  box-sizing: border-box;
+  overscroll-behavior-y: contain;
+}
+
+.detail-page {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 1.1rem;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-self: center;
+  overflow: hidden;
+}
+
+.state-msg {
+  text-align: center;
+  margin: 2rem 0;
 }
 
 .head {
-  margin-bottom: 1rem;
+  width: 100%;
+  margin-bottom: 0.5rem;
+  flex-shrink: 0;
 }
 
 .head-row {
@@ -513,18 +661,31 @@ watch(isOwnWork, (own) => {
 }
 
 .btn-report {
-  padding: 0.35rem 0.85rem;
+  flex-shrink: 0;
+  padding: 0.38rem 0.9rem;
   border-radius: 0.45rem;
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-size: 0.84rem;
+  font-weight: 650;
   cursor: pointer;
-  border: 1px solid rgba(248, 113, 113, 0.45);
-  background: rgba(239, 68, 68, 0.12);
-  color: #fca5a5;
+  border: 1px solid var(--bccr-btn-danger-border);
+  background: var(--bccr-btn-danger-bg);
+  color: var(--bccr-btn-danger-text);
+  box-shadow: var(--bccr-shadow-sm);
+  transition:
+    background 0.12s,
+    border-color 0.12s;
 }
 
-.btn-report:hover {
-  background: rgba(239, 68, 68, 0.2);
+.btn-report:hover:not(:disabled) {
+  background: var(--bccr-btn-danger-hover);
+  border-color: rgba(220, 38, 38, 0.45);
+}
+
+.btn-report.is-disabled,
+.btn-report:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .back {
@@ -552,9 +713,9 @@ watch(isOwnWork, (own) => {
   padding: 0.85rem 1rem;
   margin-bottom: 1rem;
   border-radius: 0.6rem;
-  border: 1px solid rgba(251, 191, 36, 0.35);
-  background: rgba(251, 191, 36, 0.08);
-  color: #fcd34d;
+  border: 1px solid var(--bccr-warning-border);
+  background: var(--bccr-warning-soft);
+  color: var(--bccr-warning-text);
   font-size: 0.88rem;
   line-height: 1.55;
 }
@@ -564,7 +725,7 @@ watch(isOwnWork, (own) => {
   font-size: 0.85rem;
 }
 
-.text-panel .text-hint {
+.text-panel-embed .text-hint {
   margin: 0 0 0.75rem;
   font-size: 0.78rem;
   color: var(--bccr-muted);
@@ -576,7 +737,7 @@ watch(isOwnWork, (own) => {
   padding: 1rem 1.05rem;
   border-radius: 0.5rem;
   border: 1px solid rgba(148, 163, 184, 0.15);
-  background: rgba(0, 0, 0, 0.22);
+  background: var(--bccr-code-bg);
   font-size: 0.88rem;
   line-height: 1.65;
   white-space: pre-wrap;
@@ -584,7 +745,14 @@ watch(isOwnWork, (own) => {
   max-height: min(60vh, 520px);
   overflow: auto;
   font-family: ui-sans-serif, system-ui, sans-serif;
-  color: #e2e8f0;
+  color: var(--bccr-text);
+}
+
+.text-body--embed {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
 }
 
 .text-foot {
@@ -592,96 +760,274 @@ watch(isOwnWork, (own) => {
   font-size: 0.85rem;
 }
 
-.viewer {
-  margin-bottom: 1.25rem;
-}
-
-.viewer-frame {
-  border-radius: 0.85rem;
-  border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.85);
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 200px;
-  max-height: min(72vh, 720px);
-}
-
-.viewer-img {
-  display: block;
-  max-width: 100%;
-  max-height: min(72vh, 720px);
-  width: auto;
-  height: auto;
-  object-fit: contain;
-}
-
-.viewer-actions {
-  margin: 0.65rem 0 0;
-  font-size: 0.88rem;
-}
-
 .link-open {
   color: var(--bccr-accent);
 }
 
-.hero {
+.detail-ig {
   display: grid;
-  grid-template-columns: minmax(0, 280px) 1fr;
-  gap: 1.25rem;
-  margin-bottom: 1.25rem;
-  padding: 1.15rem;
-  border-radius: 0.85rem;
-  border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.45);
-}
-
-.hero--full {
-  grid-template-columns: 1fr;
-}
-
-@media (max-width: 640px) {
-  .hero:not(.hero--full) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.cover {
-  border-radius: 0.65rem;
+  grid-template-columns: 1fr minmax(280px, 380px);
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 100%;
+  border-radius: 1rem;
   overflow: hidden;
-  aspect-ratio: 4 / 3;
-  background: rgba(30, 41, 59, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: var(--bccr-panel-bg);
+}
+
+.detail-ig > .ig-media,
+.detail-ig > .ig-rail {
+  min-height: 0;
+}
+
+.ig-media {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  background: var(--bccr-card);
+  border-right: 1px solid rgba(148, 163, 184, 0.12);
+  padding: 0.5rem 0.65rem;
+  min-height: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.media-shell {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.media-frame {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: 0.45rem;
+  overflow: hidden;
+  background: var(--bccr-media-bg);
 }
 
-.cover img {
+.media-img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  object-position: center;
+}
+
+.media-foot {
+  margin: 0.45rem 0 0;
+  font-size: 0.82rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.media-ph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 0;
+  min-height: 0;
   width: 100%;
-  height: 100%;
-  object-fit: cover;
 }
 
-.cover-ph {
+.media-ph-letter {
   font-size: 3rem;
-  font-weight: 700;
-  color: rgba(148, 163, 184, 0.35);
+  font-weight: 800;
+  color: var(--bccr-text-hint);
 }
 
-.title {
-  margin: 0 0 0.65rem;
-  font-size: 1.45rem;
-  font-weight: 700;
+.ig-rail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bccr-surface-muted);
+}
+
+.rail-inner {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  margin-top: 0.25rem;
+  padding: 0.75rem 0.2rem 0.5rem 0.95rem;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  align-content: flex-start;
+  gap: 0.65rem;
+  box-sizing: border-box;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.rail-inner > * {
+  flex-shrink: 0;
+}
+
+.rail-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding-bottom: 0.35rem;
+  margin-bottom: 0.15rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  background: var(--bccr-surface-muted);
+}
+
+.rail-head-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.45rem;
+}
+
+.rail-title {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 1.18rem;
+  font-weight: 750;
   line-height: 1.3;
+  color: var(--bccr-text);
+  letter-spacing: -0.02em;
 }
 
-.line {
-  margin: 0 0 0.45rem;
+.rail-author {
+  margin: 0 0 0.4rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.5rem;
+  font-size: 0.92rem;
+}
+
+.rail-author-lbl {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--bccr-muted);
+}
+
+.rail-author-name {
+  font-weight: 650;
+  color: var(--bccr-text);
+}
+
+.rail-pills {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+  margin: 0 0 0.35rem;
+}
+
+.rail-id {
+  margin: 0;
+}
+
+.panel-tight {
+  padding: 0.75rem 0.85rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: var(--bccr-panel-muted);
+}
+
+.rail-h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.88rem;
+  font-weight: 650;
+  color: var(--bccr-text);
+}
+
+.dl-compact {
+  grid-template-columns: 5.25rem 1fr;
+  gap: 0.3rem 0.55rem;
+  font-size: 0.8rem;
+}
+
+.onchain-head {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.onchain-head .rail-h2 {
+  margin: 0;
+}
+
+.btn-onchain {
+  padding: 0.3rem 0.65rem;
+  border-radius: 0.4rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--bccr-btn-info-border);
+  background: var(--bccr-btn-info-bg);
+  color: var(--bccr-btn-info-text);
+}
+
+.btn-onchain:hover:not(:disabled) {
+  background: var(--bccr-btn-info-hover);
+}
+
+.btn-onchain:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.onchain-msg {
+  margin: 0 0 0.35rem;
+  font-size: 0.82rem;
+}
+
+.onchain-dl dd {
+  font-size: 0.78rem;
+}
+
+.rail-desc {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.58;
+  color: var(--bccr-muted);
+}
+
+.text-panel-embed {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ig-text-h {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--bccr-text);
 }
 
 .muted-sm {
@@ -694,36 +1040,15 @@ watch(isOwnWork, (own) => {
   padding: 0.15rem 0.55rem;
   border-radius: 999px;
   font-size: 0.78rem;
-  background: rgba(59, 130, 246, 0.2);
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  color: #bfdbfe;
+  background: var(--bccr-pill-bg);
+  border: 1px solid var(--bccr-accent-border);
+  color: var(--bccr-pill-text);
 }
 
 .pill.soft {
-  background: rgba(148, 163, 184, 0.15);
+  background: var(--bccr-hover);
   border-color: rgba(148, 163, 184, 0.25);
   color: var(--bccr-muted);
-}
-
-.desc {
-  margin: 0.75rem 0 0;
-  font-size: 0.92rem;
-  line-height: 1.6;
-  color: #cbd5e1;
-}
-
-.panel {
-  padding: 1.15rem 1.2rem;
-  border-radius: 0.75rem;
-  border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.35);
-  margin-bottom: 1rem;
-}
-
-.h2 {
-  margin: 0 0 0.85rem;
-  font-size: 1rem;
-  font-weight: 650;
 }
 
 .dl {
@@ -758,6 +1083,46 @@ watch(isOwnWork, (own) => {
   word-break: break-all;
 }
 
+@media (max-width: 900px) {
+  .page-shell {
+    flex: none;
+    max-height: none;
+    min-height: 100dvh;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  .detail-ig {
+    grid-template-columns: 1fr;
+    min-height: 0;
+    flex: none;
+  }
+
+  .ig-media {
+    border-right: none;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+    min-height: 0;
+    max-height: min(48vh, 400px);
+    height: auto;
+  }
+
+  .ig-rail {
+    min-height: 0;
+    max-height: none;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .rail-inner {
+    max-height: min(52dvh, 480px);
+    min-height: 0;
+    flex: none;
+    overflow-y: auto;
+    padding-bottom: 0.75rem;
+  }
+}
+
 .modal-root {
   position: fixed;
   inset: 0;
@@ -772,7 +1137,7 @@ watch(isOwnWork, (own) => {
   position: absolute;
   inset: 0;
   z-index: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--bccr-overlay);
   backdrop-filter: blur(2px);
 }
 
@@ -783,8 +1148,8 @@ watch(isOwnWork, (own) => {
   padding: 1.25rem 1.35rem;
   border-radius: 0.75rem;
   border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.97);
-  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+  background: var(--bccr-surface-overlay);
+  box-shadow: 0 24px 48px var(--bccr-overlay);
 }
 
 .modal-title {
@@ -815,7 +1180,7 @@ watch(isOwnWork, (own) => {
   padding: 0.45rem 0.55rem;
   border-radius: 0.45rem;
   border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.85);
+  background: var(--bccr-input-bg);
   color: var(--bccr-text);
   font-size: 0.88rem;
 }
@@ -838,7 +1203,7 @@ watch(isOwnWork, (own) => {
 }
 
 .ok {
-  color: #86efac;
+  color: var(--bccr-success-text);
 }
 
 .modal-actions {

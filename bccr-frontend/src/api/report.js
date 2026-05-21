@@ -1,9 +1,9 @@
-import { request } from './client'
+import { postReportWork } from './interaction'
 
 /**
- * 举报作品（对接 BCCRight AuditController）
- * POST /api/audit/{workId}/report
- * Body: { reason } — ReportRequest 仅含 reason；补充说明并入同一字段。
+ * 举报作品（对接 InteractionController）
+ * POST /api/interaction/report/{workId}
+ * Body: { reason }；补充说明并入同一 reason 字符串。
  *
  * @param {{ workId: string; reason: string; detail?: string }} payload
  */
@@ -19,10 +19,5 @@ export async function submitWorkReport(payload) {
     reasonText = `${reason}｜${detail}`
   }
 
-  const id = encodeURIComponent(workId)
-
-  return request(`/api/audit/${id}/report`, {
-    method: 'POST',
-    json: { reason: reasonText },
-  })
+  return postReportWork(workId, reasonText)
 }

@@ -61,12 +61,12 @@ defineEmits(['open-work'])
   padding: 0.9rem 1rem;
   border-radius: 0.7rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--bccr-hover);
   border-left: 4px solid rgba(148, 163, 184, 0.35);
 }
 
 .item.tone-high {
-  border-left-color: #f87171;
+  border-left-color: var(--bccr-danger);
   background: linear-gradient(90deg, rgba(248, 113, 113, 0.06), transparent);
 }
 
@@ -89,7 +89,7 @@ defineEmits(['open-work'])
 .sim {
   font-size: 1rem;
   font-weight: 800;
-  color: #fcd34d;
+  color: var(--bccr-warning-text);
 }
 
 .pill {
@@ -98,7 +98,7 @@ defineEmits(['open-work'])
   border-radius: 999px;
   background: rgba(59, 130, 246, 0.15);
   border: 1px solid rgba(96, 165, 250, 0.25);
-  color: #bfdbfe;
+  color: var(--bccr-pill-text);
 }
 
 .name {

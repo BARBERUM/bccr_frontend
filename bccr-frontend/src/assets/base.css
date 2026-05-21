@@ -1,14 +1,107 @@
 :root {
-  --bccr-bg-1: #0c1222;
-  --bccr-bg-2: #1a2744;
-  --bccr-accent: #3b82f6;
-  --bccr-accent-hover: #2563eb;
-  --bccr-text: #e8eef7;
-  --bccr-muted: #94a3b8;
-  --bccr-card: rgba(15, 23, 42, 0.72);
-  --bccr-border: rgba(148, 163, 184, 0.18);
-  --bccr-danger: #f87171;
-  --bccr-success: #4ade80;
+  color-scheme: light;
+
+  --bccr-bg-1: #f4f7fb;
+  --bccr-bg-2: #e8eef5;
+  --bccr-page-bg: radial-gradient(1200px 600px at 10% 0%, rgba(59, 130, 246, 0.1) 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 20%, rgba(139, 92, 246, 0.08) 0%, transparent 50%),
+    linear-gradient(165deg, var(--bccr-bg-1), var(--bccr-bg-2));
+
+  --bccr-accent: #2563eb;
+  --bccr-accent-hover: #1d4ed8;
+  --bccr-text-strong: #0f172a;
+  --bccr-text: #334155;
+  --bccr-text-secondary: #475569;
+  --bccr-muted: #64748b;
+  --bccr-text-hint: #94a3b8;
+  --bccr-heading: #0f172a;
+  --bccr-link: #2563eb;
+  --bccr-link-hover: #1d4ed8;
+  --bccr-card: rgba(255, 255, 255, 0.96);
+  --bccr-border: rgba(15, 23, 42, 0.1);
+  --bccr-danger: #dc2626;
+  --bccr-success: #16a34a;
+
+  /* 表面与布局 */
+  --bccr-surface: #ffffff;
+  --bccr-surface-muted: #f1f5f9;
+  --bccr-surface-elevated: #ffffff;
+  --bccr-surface-overlay: rgba(255, 255, 255, 0.98);
+  --bccr-surface-glass: rgba(255, 255, 255, 0.92);
+  --bccr-nav-bg: rgba(255, 255, 255, 0.96);
+  --bccr-topbar-bg: rgba(255, 255, 255, 0.9);
+  --bccr-input-bg: #ffffff;
+  --bccr-code-bg: #f1f5f9;
+  --bccr-media-bg: #f8fafc;
+  --bccr-panel-bg: #ffffff;
+  --bccr-panel-muted: #f8fafc;
+  --bccr-hover: rgba(15, 23, 42, 0.05);
+  --bccr-overlay: rgba(15, 23, 42, 0.35);
+
+  /* 阴影 */
+  --bccr-shadow-sm: 0 2px 8px rgba(15, 23, 42, 0.06);
+  --bccr-shadow-md: 0 8px 24px rgba(15, 23, 42, 0.08);
+  --bccr-shadow-lg: 0 16px 48px rgba(15, 23, 42, 0.1);
+
+  /* 强调色衍生 */
+  --bccr-accent-soft: rgba(37, 99, 235, 0.1);
+  --bccr-accent-border: rgba(37, 99, 235, 0.28);
+  --bccr-accent-text: #1d4ed8;
+  --bccr-pill-bg: rgba(37, 99, 235, 0.1);
+  --bccr-pill-text: #1d4ed8;
+  --bccr-nav-active-bg: rgba(37, 99, 235, 0.12);
+  --bccr-on-accent: #ffffff;
+  --bccr-label: #475569;
+  --bccr-placeholder: #94a3b8;
+
+  /* 按钮 */
+  --bccr-btn-primary-bg: linear-gradient(135deg, #2563eb, #4f46e5);
+  --bccr-btn-primary-hover: linear-gradient(135deg, #1d4ed8, #4338ca);
+  --bccr-btn-ghost-bg: #ffffff;
+  --bccr-btn-ghost-border: var(--bccr-option-border);
+  --bccr-btn-ghost-text: var(--bccr-text-secondary);
+  --bccr-btn-ghost-hover-bg: var(--bccr-option-active-bg);
+  --bccr-btn-ghost-hover-border: var(--bccr-option-hover-border);
+  --bccr-btn-ghost-hover-text: var(--bccr-text);
+  --bccr-btn-ghost-hover: var(--bccr-hover);
+  --bccr-btn-danger-bg: rgba(220, 38, 38, 0.08);
+  --bccr-btn-danger-border: rgba(220, 38, 38, 0.32);
+  --bccr-btn-danger-text: #b91c1c;
+  --bccr-btn-danger-hover: rgba(220, 38, 38, 0.14);
+  --bccr-btn-info-bg: rgba(37, 99, 235, 0.08);
+  --bccr-btn-info-border: rgba(37, 99, 235, 0.28);
+  --bccr-btn-info-text: #1d4ed8;
+  --bccr-btn-info-hover: rgba(37, 99, 235, 0.14);
+
+  /* 状态提示 */
+  --bccr-warning-soft: rgba(245, 158, 11, 0.1);
+  --bccr-warning-border: rgba(245, 158, 11, 0.35);
+  --bccr-warning-text: #b45309;
+  --bccr-success-soft: rgba(22, 163, 74, 0.1);
+  --bccr-success-text: #15803d;
+  --bccr-danger-soft: rgba(220, 38, 38, 0.08);
+
+  /* 表单选项 / 上传区 / 卡片标题（查重、登记、授权等共用） */
+  --bccr-choice-surface-bg: linear-gradient(165deg, #f8fafc 0%, #f1f5f9 100%);
+  --bccr-choice-surface-border: rgba(15, 23, 42, 0.1);
+  --bccr-option-bg: #ffffff;
+  --bccr-option-border: rgba(15, 23, 42, 0.12);
+  --bccr-option-text: var(--bccr-text-secondary);
+  --bccr-option-hover-border: rgba(37, 99, 235, 0.32);
+  --bccr-option-hover-bg: #ffffff;
+  --bccr-option-active-bg: rgba(37, 99, 235, 0.1);
+  --bccr-option-active-border: rgba(37, 99, 235, 0.42);
+  --bccr-option-active-text: var(--bccr-accent-text);
+  --bccr-upload-bg: var(--bccr-choice-surface-bg);
+  --bccr-upload-border: var(--bccr-choice-surface-border);
+  --bccr-upload-hover-border: rgba(37, 99, 235, 0.38);
+  --bccr-upload-hover-bg: linear-gradient(165deg, #f1f5f9 0%, #e8eef5 100%);
+  --bccr-upload-drag-bg: rgba(37, 99, 235, 0.08);
+  --bccr-upload-has-border: rgba(22, 163, 74, 0.38);
+  --bccr-upload-has-bg: linear-gradient(165deg, rgba(22, 163, 74, 0.08) 0%, #f1f5f9 100%);
+  --bccr-title-gradient: linear-gradient(120deg, #0f172a 0%, #2563eb 48%, #6d28d9 100%);
+  --bccr-section-title: var(--bccr-heading);
+
   --font-sans: 'Segoe UI', system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei',
     sans-serif;
 }
@@ -19,20 +112,26 @@
   box-sizing: border-box;
 }
 
+html {
+  background-color: var(--bccr-bg-1);
+}
+
 body {
+  min-height: 100%;
+  min-height: 100dvh;
   font-family: var(--font-sans);
-  background: radial-gradient(1200px 600px at 10% 0%, #1e3a5f 0%, transparent 55%),
-    radial-gradient(900px 500px at 100% 20%, #312e81 0%, transparent 50%),
-    linear-gradient(165deg, var(--bccr-bg-1), var(--bccr-bg-2));
+  background: var(--bccr-page-bg);
+  background-color: var(--bccr-bg-1);
   color: var(--bccr-text);
   -webkit-font-smoothing: antialiased;
 }
 
 a {
-  color: var(--bccr-accent);
+  color: var(--bccr-link);
   text-decoration: none;
 }
 
 a:hover {
+  color: var(--bccr-link-hover);
   text-decoration: underline;
 }

@@ -2,11 +2,18 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import * as auditApi from '@/api/audit'
+import * as userApi from '@/api/user'
+import { normalizeWorkIdParam } from '@/api/work'
 import {
+  formatAuditHistoryBadge,
   formatAuditStatus,
   pickAuditCaseId,
+  pickAuditLogAddress,
+  pickAuditOperator,
+  pickAuditRemark,
   pickReasonRaw,
   pickReporter,
+  pickWorkAuthorLabel,
   pickWorkId,
   pickWorkTitle,
   reasonCodeLabel,
@@ -27,7 +34,18 @@ const historyList = ref([])
 const listLoading = ref(false)
 const listError = ref('')
 const historyPage = ref(1)
-const historyLoaded = ref(false)
+const historySize = ref(10)
+const historyTotal = ref(0)
+const historyPages = ref(0)
+/** @type {import('vue').Ref<string>} */
+const historyAction = ref('')
+const historyWorkIdFilter = ref('')
+const historyWorkFullMode = ref(false)
+
+/** 链上地址 → 用户展示信息（审核记录「处理人」反查） */
+const historyProfileByAddress = ref(
+  /** @type {Record<string, Record<string, unknown>>} */ ({}),
+)
 
 /** @type {import('vue').Ref<{ type: 'approve' | 'reject'; row: Record<string, unknown> } | null>} */
 const pendingAction = ref(null)
@@ -38,7 +56,7 @@ const hasPendingAction = computed(() => pendingAction.value != null)
 
 watch(mainTab, (t) => {
   listError.value = ''
-  if (t === 'history' && !historyLoaded.value) {
+  if (t === 'history') {
     loadHistory()
   }
 })
@@ -52,9 +70,16 @@ function formatTime(v) {
 
 /** @param {unknown} id */
 function goWork(id) {
-  const w = String(id ?? '').trim()
+  const w = normalizeWorkIdParam(id)
   if (!w) return
   router.push({ name: 'work-detail', params: { workId: w } })
+}
+
+/** 跳转查重中心并按作品 ID 加载相似度/查重链上记录 */
+function goSimilarityRecordsForWork(id) {
+  const w = normalizeWorkIdParam(id)
+  if (!w) return
+  router.push({ name: 'check', query: { workId: w } })
 }
 
 function openApprove(row) {
@@ -75,9 +100,9 @@ function cancelAction() {
 async function confirmAction() {
   const ctx = pendingAction.value
   if (!ctx) return
-  const id = pickAuditCaseId(ctx.row)
-  if (!id) {
-    listError.value = '缺少审核单 ID'
+  const workId = normalizeWorkIdParam(pickWorkId(ctx.row))
+  if (!workId) {
+    listError.value = '缺少业务作品 ID（如 work-…），无法提交审核。请确认待办数据里包含作品编号。'
     return
   }
   actionSubmitting.value = true
@@ -85,9 +110,9 @@ async function confirmAction() {
   try {
     const note = actionNote.value.trim()
     if (ctx.type === 'approve') {
-      await auditApi.approveAuditCase(id, note ? { remark: note } : {})
+      await auditApi.approveAuditCase(workId, note ? { remark: note } : {})
     } else {
-      await auditApi.rejectAuditCase(id, note ? { remark: note } : {})
+      await auditApi.rejectAuditCase(workId, note ? { remark: note } : {})
     }
     cancelAction()
     await loadPending()
@@ -113,17 +138,148 @@ async function loadPending() {
   }
 }
 
+function historyRowTime(row) {
+  return row.operateTime ?? row.createdAt ?? row.updatedAt ?? row.resolvedAt ?? ''
+}
+
+/** @param {Record<string, unknown>} row */
+function historyWorkDisplayTitle(row) {
+  const t = pickWorkTitle(row)
+  return t || '（未命名作品）'
+}
+
+/** @param {string} addr */
+function auditAddressCacheKey(addr) {
+  const s = String(addr ?? '').trim()
+  if (/^0x[a-fA-F0-9]{20,}$/i.test(s)) return s.toLowerCase()
+  return s
+}
+
+/** @param {Record<string, unknown>} row */
+function historyOperatorDisplay(row) {
+  const addr = pickAuditLogAddress(row)
+  if (addr) {
+    const key = auditAddressCacheKey(addr)
+    if (historyProfileByAddress.value[key]) {
+      const p = historyProfileByAddress.value[key]
+      const nick = String(p.nickname ?? '').trim()
+      const user = String(p.username ?? '').trim()
+      if (nick && user) return `${nick}（${user}）`
+      if (nick) return nick
+      if (user) return user
+    }
+  }
+  const op = pickAuditOperator(row)
+  if (op) return op
+  if (addr) return shortAddr(addr, 10, 8)
+  return '—'
+}
+
+/**
+ * 根据审核日志中的 address 批量拉取用户昵称等（去重、静默失败）
+ * @param {Record<string, unknown>[]} rows
+ */
+async function hydrateHistoryOperatorProfiles(rows) {
+  /** @type {Map<string, string>} key -> 请求用原始地址 */
+  const toFetch = new Map()
+  for (const row of rows) {
+    const addr = pickAuditLogAddress(/** @type {Record<string, unknown>} */ (row))
+    if (!addr) continue
+    const key = auditAddressCacheKey(addr)
+    if (historyProfileByAddress.value[key]) continue
+    if (!toFetch.has(key)) toFetch.set(key, addr)
+  }
+  if (!toFetch.size) return
+  await Promise.all(
+    [...toFetch.entries()].map(async ([key, fetchAddr]) => {
+      try {
+        const data = await userApi.fetchUserByBlockchainAddress(fetchAddr)
+        if (data && typeof data === 'object') {
+          historyProfileByAddress.value = {
+            ...historyProfileByAddress.value,
+            [key]: /** @type {Record<string, unknown>} */ (data),
+          }
+        }
+      } catch {
+        /* 用户不存在或无权：保留地址缩写展示 */
+      }
+    }),
+  )
+}
+
+function applyHistoryFilters() {
+  historyWorkFullMode.value = false
+  historyPage.value = 1
+  loadHistory()
+}
+
+function openWorkFullHistory() {
+  if (!historyWorkIdFilter.value.trim()) {
+    listError.value = '请先填写作品 ID'
+    return
+  }
+  historyWorkFullMode.value = true
+  historyPage.value = 1
+  loadHistory()
+}
+
+function backToPagedHistory() {
+  historyWorkFullMode.value = false
+  loadHistory()
+}
+
+function historyPrev() {
+  if (historyWorkFullMode.value || historyPage.value <= 1) return
+  historyPage.value -= 1
+  loadHistory()
+}
+
+function historyNext() {
+  if (historyWorkFullMode.value) return
+  const maxP = historyPages.value || 1
+  if (historyPage.value >= maxP) return
+  historyPage.value += 1
+  loadHistory()
+}
+
 async function loadHistory() {
   listLoading.value = true
   listError.value = ''
   try {
-    const data = await auditApi.fetchAuditHistory({ page: historyPage.value })
-    historyList.value = auditApi.normalizeAuditList(data)
-    historyLoaded.value = true
+    if (historyWorkFullMode.value) {
+      const wid = historyWorkIdFilter.value.trim()
+      if (!wid) {
+        historyList.value = []
+        historyTotal.value = 0
+        historyPages.value = 0
+        listError.value = '「该作品全部」需填写作品 ID'
+        return
+      }
+      const data = await auditApi.fetchWorkAuditLogs(wid)
+      historyList.value = auditApi.normalizeAuditList(data)
+      historyTotal.value = historyList.value.length
+      historyPages.value = 1
+      await hydrateHistoryOperatorProfiles(historyList.value)
+      return
+    }
+    const data = await auditApi.fetchAuditLogs({
+      page: historyPage.value,
+      size: historySize.value,
+      action: historyAction.value.trim() || undefined,
+      workId: historyWorkIdFilter.value.trim() || undefined,
+    })
+    const norm = auditApi.normalizeAuditLogPage(data)
+    historyList.value = /** @type {Record<string, unknown>[]} */ (norm.items)
+    historyTotal.value = norm.total
+    historyPages.value = norm.pages
+    historyPage.value = norm.page
+    historySize.value = norm.size
+    await hydrateHistoryOperatorProfiles(historyList.value)
   } catch (e) {
-    listError.value = e?.message || '加载记录失败（若后端未实现 history 接口可忽略）'
+    listError.value = e?.message || '加载记录失败'
     historyList.value = []
-    historyLoaded.value = true
+    historyTotal.value = 0
+    historyPages.value = 0
   } finally {
     listLoading.value = false
   }
@@ -261,47 +417,157 @@ loadPending()
       </section>
 
       <section v-show="mainTab === 'history'" class="panel panel--muted">
-        <div class="panel-head">
-          <h2 class="h2">最近处理</h2>
+        <div class="panel-head panel-head--split">
+          <div>
+            <h2 class="h2">处理记录</h2>
+            <p class="panel-sub">作品名称、作者与处理结果；作品编号可跳转详情。</p>
+          </div>
           <button type="button" class="btn-ghost" :disabled="listLoading" @click="loadHistory">
-            {{ listLoading ? '加载中…' : '重新加载' }}
+            {{ listLoading ? '加载中…' : '刷新' }}
           </button>
+        </div>
+        <div class="hist-toolbar">
+          <div class="hist-filters">
+            <label class="hist-field">
+              <span class="hist-label">操作</span>
+              <select v-model="historyAction" class="hist-input" @change="applyHistoryFilters">
+                <option value="">全部</option>
+                <option value="approve">通过</option>
+                <option value="reject">驳回</option>
+              </select>
+            </label>
+            <label class="hist-field hist-field--grow">
+              <span class="hist-label">作品 ID</span>
+              <input
+                v-model.trim="historyWorkIdFilter"
+                type="text"
+                class="hist-input"
+                placeholder="可选，筛选某作品"
+                @keyup.enter="applyHistoryFilters"
+              />
+            </label>
+            <label class="hist-field">
+              <span class="hist-label">每页</span>
+              <select v-model.number="historySize" class="hist-input" @change="applyHistoryFilters">
+                <option :value="10">10</option>
+                <option :value="20">20</option>
+                <option :value="50">50</option>
+              </select>
+            </label>
+          </div>
+          <div class="hist-actions">
+            <button type="button" class="btn-ghost" :disabled="listLoading" @click="applyHistoryFilters">
+              应用筛选
+            </button>
+            <button
+              type="button"
+              class="btn-ghost"
+              :disabled="listLoading || historyWorkFullMode"
+              @click="openWorkFullHistory"
+            >
+              该作品全部
+            </button>
+            <button
+              v-if="historyWorkFullMode"
+              type="button"
+              class="btn-ghost"
+              :disabled="listLoading"
+              @click="backToPagedHistory"
+            >
+              返回分页
+            </button>
+          </div>
+        </div>
+        <p v-if="historyWorkFullMode" class="hist-hint">
+          当前展示作品 <span class="mono">{{ historyWorkIdFilter }}</span> 的全部审核记录（共 {{ historyTotal }} 条）。
+        </p>
+        <div v-if="!historyWorkFullMode && historyTotal > 0" class="hist-pagination">
+          <span class="hist-page-meta">
+            第 {{ historyPage }} / {{ historyPages || 1 }} 页，共 {{ historyTotal }} 条
+          </span>
+          <div class="hist-page-btns">
+            <button type="button" class="btn-ghost btn-ghost--sm" :disabled="listLoading || historyPage <= 1" @click="historyPrev">
+              上一页
+            </button>
+            <button
+              type="button"
+              class="btn-ghost btn-ghost--sm"
+              :disabled="listLoading || historyPage >= (historyPages || 1)"
+              @click="historyNext"
+            >
+              下一页
+            </button>
+          </div>
         </div>
         <p v-if="listLoading && !historyList.length" class="empty empty--soft">
           正在加载记录…
         </p>
         <p v-else-if="!listLoading && !historyList.length" class="empty empty--soft">
-          暂无记录，或接口 <code class="mono">GET /api/audit/history</code> 尚未开放。
+          暂无记录。可调整筛选条件后重试。
         </p>
-        <ul v-else class="case-list case-list--dense">
-          <li
-            v-for="row in historyList"
-            :key="pickAuditCaseId(row) + String(row.updatedAt ?? row.resolvedAt ?? '')"
-            class="case-card case-card--flat"
-          >
-            <div class="case-top">
+        <div v-else class="hist-rec-scroll bccr-scroll-slim">
+          <ul class="hist-rec-list">
+            <li
+              v-for="(row, idx) in historyList"
+              :key="`${pickAuditCaseId(row)}-${idx}-${historyRowTime(row)}`"
+              class="hist-rec"
+            >
+            <div class="hist-rec__head">
               <span
-                class="pill-status"
-                :class="`tone-${formatAuditStatus(row.status ?? row.state).tone}`"
+                class="hist-rec__badge"
+                :class="`tone-${formatAuditHistoryBadge(row).tone}`"
               >
-                {{ formatAuditStatus(row.status ?? row.state).label }}
+                {{ formatAuditHistoryBadge(row).label }}
               </span>
-              <span class="case-time">{{ formatTime(row.updatedAt ?? row.resolvedAt ?? row.createdAt) }}</span>
+              <time class="hist-rec__time" :datetime="String(historyRowTime(row) || '')">{{
+                formatTime(historyRowTime(row))
+              }}</time>
             </div>
-            <p class="hist-line">
-              <span class="mono">{{ pickAuditCaseId(row) }}</span>
-              ·
-              <button v-if="pickWorkId(row)" type="button" class="link-inline mono" @click="goWork(pickWorkId(row))">
+            <h3 class="hist-rec__title">{{ historyWorkDisplayTitle(row) }}</h3>
+            <p class="hist-rec__author">
+              <span class="hist-rec__k">作者</span>
+              <span class="hist-rec__v">{{ pickWorkAuthorLabel(row) || '—' }}</span>
+            </p>
+            <div class="hist-rec__workid">
+              <span class="hist-rec__k">作品编号</span>
+              <button
+                v-if="pickWorkId(row)"
+                type="button"
+                class="hist-rec__id-btn mono"
+                @click="goWork(pickWorkId(row))"
+              >
                 {{ pickWorkId(row) }}
               </button>
-              <span v-else class="muted">—</span>
+              <span v-else class="hist-rec__v muted">—</span>
+            </div>
+            <dl class="hist-rec__meta">
+              <div v-if="pickAuditCaseId(row)" class="hist-rec__meta-row">
+                <dt>关联单号</dt>
+                <dd class="mono">{{ pickAuditCaseId(row) }}</dd>
+              </div>
+              <div v-if="pickAuditLogAddress(row) || pickAuditOperator(row)" class="hist-rec__meta-row">
+                <dt>处理人</dt>
+                <dd>{{ historyOperatorDisplay(row) }}</dd>
+              </div>
+            </dl>
+            <p v-if="pickAuditRemark(row)" class="hist-rec__remark">
+              <span class="hist-rec__remark-k">备注</span>
+              {{ pickAuditRemark(row) }}
             </p>
-          </li>
-        </ul>
+            </li>
+          </ul>
+        </div>
       </section>
 
-      <div v-if="hasPendingAction" class="action-dock" role="dialog" aria-modal="true" aria-labelledby="dock-title">
-        <div class="dock-inner">
+      <div
+        v-if="hasPendingAction"
+        class="action-dock"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dock-title"
+        @click.self="!actionSubmitting && cancelAction()"
+      >
+        <div class="dock-inner" @click.stop>
           <h3 id="dock-title" class="dock-title">
             {{ pendingAction?.type === 'approve' ? '确认通过' : '确认驳回' }}
           </h3>
@@ -309,6 +575,17 @@ loadPending()
             单号 {{ pickAuditCaseId(pendingAction?.row ?? {}) }} · 作品
             {{ pickWorkId(pendingAction?.row ?? {}) || '—' }}
           </p>
+          <div class="dock-extra">
+            <button
+              type="button"
+              class="btn-dock-link"
+              :disabled="!pickWorkId(pendingAction?.row ?? {})"
+              @click="goSimilarityRecordsForWork(pickWorkId(pendingAction?.row ?? {}))"
+            >
+              查看该作品相似度对比记录
+            </button>
+            <span v-if="!pickWorkId(pendingAction?.row ?? {})" class="dock-extra-hint">当前行无作品 ID</span>
+          </div>
           <label class="dock-label">
             <span>备注（可选）</span>
             <textarea
@@ -405,7 +682,7 @@ loadPending()
   padding: 0.32rem;
   border-radius: 0.9rem;
   border: 1px solid rgba(244, 114, 182, 0.22);
-  background: rgba(15, 23, 42, 0.55);
+  background: var(--bccr-panel-bg);
   backdrop-filter: blur(10px);
 }
 
@@ -430,11 +707,11 @@ loadPending()
 }
 
 .tab:hover {
-  color: #fbcfe8;
+  color: #db2777;
 }
 
 .tab.active {
-  color: #fdf2f8;
+  color: #9d174d;
   background: linear-gradient(135deg, rgba(236, 72, 153, 0.42), rgba(139, 92, 246, 0.32));
   box-shadow: 0 4px 22px rgba(236, 72, 153, 0.18);
 }
@@ -450,7 +727,7 @@ loadPending()
   border-radius: 0.5rem;
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(248, 113, 113, 0.28);
-  color: #fecaca;
+  color: var(--bccr-danger);
   font-size: 0.86rem;
 }
 
@@ -458,13 +735,13 @@ loadPending()
   padding: 1.25rem 1.35rem;
   border-radius: 1rem;
   border: 1px solid rgba(244, 114, 182, 0.14);
-  background: rgba(15, 23, 42, 0.48);
-  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.05), 0 18px 48px rgba(0, 0, 0, 0.2);
+  background: var(--bccr-card);
+  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.05), 0 18px 48px var(--bccr-hover);
 }
 
 .panel--muted {
   border-color: rgba(148, 163, 184, 0.14);
-  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.06), 0 14px 40px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.06), 0 14px 40px var(--bccr-hover);
 }
 
 .panel-head {
@@ -475,33 +752,22 @@ loadPending()
   margin-bottom: 1rem;
 }
 
+.panel-head--split {
+  align-items: flex-start;
+}
+
+.panel-sub {
+  margin: 0.3rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--bccr-muted);
+  max-width: 26rem;
+}
+
 .h2 {
   margin: 0;
   font-size: 1.05rem;
   font-weight: 650;
-}
-
-.btn-ghost {
-  padding: 0.38rem 0.75rem;
-  border-radius: 0.45rem;
-  border: 1px solid rgba(244, 114, 182, 0.35);
-  background: rgba(236, 72, 153, 0.08);
-  color: #fbcfe8;
-  font-size: 0.8rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    background 0.12s,
-    border-color 0.12s;
-}
-
-.btn-ghost:hover:not(:disabled) {
-  background: rgba(236, 72, 153, 0.14);
-}
-
-.btn-ghost:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 .empty {
@@ -542,7 +808,7 @@ loadPending()
   padding: 1.05rem 1.15rem;
   border-radius: 0.85rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
-  background: linear-gradient(155deg, rgba(30, 41, 59, 0.55), rgba(15, 23, 42, 0.38));
+  background: linear-gradient(155deg, var(--bccr-surface-muted), var(--bccr-surface-muted));
   border-left: 4px solid rgba(244, 114, 182, 0.55);
 }
 
@@ -571,43 +837,327 @@ loadPending()
 .pill-status.tone-warn {
   background: rgba(251, 191, 36, 0.12);
   border-color: rgba(251, 191, 36, 0.35);
-  color: #fde68a;
+  color: var(--bccr-warning-text);
 }
 
 .pill-status.tone-info {
-  background: rgba(59, 130, 246, 0.12);
+  background: var(--bccr-accent-soft);
   border-color: rgba(96, 165, 250, 0.3);
-  color: #bfdbfe;
+  color: var(--bccr-pill-text);
 }
 
 .pill-status.tone-ok {
   background: rgba(34, 197, 94, 0.12);
   border-color: rgba(74, 222, 128, 0.32);
-  color: #bbf7d0;
+  color: var(--bccr-success-text);
 }
 
 .pill-status.tone-bad {
   background: rgba(248, 113, 113, 0.1);
   border-color: rgba(248, 113, 113, 0.28);
-  color: #fecaca;
+  color: var(--bccr-danger);
 }
 
 .pill-status.tone-muted {
-  background: rgba(148, 163, 184, 0.1);
+  background: var(--bccr-hover);
   border-color: rgba(148, 163, 184, 0.22);
-  color: #cbd5e1;
+  color: var(--bccr-muted);
+}
+
+.pill-status--sm {
+  font-size: 0.68rem;
+  padding: 0.14rem 0.45rem;
+}
+
+.hist-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-bottom: 0.85rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: var(--bccr-surface-muted);
+}
+
+.hist-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: flex-end;
+}
+
+.hist-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 5.5rem;
+}
+
+.hist-field--grow {
+  flex: 1 1 10rem;
+  min-width: 8rem;
+}
+
+.hist-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--bccr-muted);
+  letter-spacing: 0.02em;
+}
+
+.hist-input {
+  font-size: 0.82rem;
+  padding: 0.38rem 0.5rem;
+  border-radius: 0.45rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: var(--bccr-panel-bg);
+  color: var(--bccr-text);
+}
+
+.hist-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.hist-hint {
+  margin: 0 0 0.65rem;
+  font-size: 0.82rem;
+  color: var(--bccr-muted);
+}
+
+.hist-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+  font-size: 0.8rem;
+  color: var(--bccr-muted);
+}
+
+.hist-rec-scroll {
+  max-height: min(52vh, 480px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  margin-top: 0.25rem;
+  padding-right: 0.2rem;
+}
+
+.hist-page-btns {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.btn-ghost--sm {
+  padding: 0.28rem 0.55rem;
+  font-size: 0.78rem;
+}
+
+/* —— 审核记录列表（处理记录）—— */
+.hist-rec-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.hist-rec {
+  position: relative;
+  padding: 1rem 1.05rem 1rem 1.15rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: linear-gradient(135deg, var(--bccr-surface-muted), var(--bccr-card));
+  box-shadow: 0 8px 28px var(--bccr-hover);
+  overflow: hidden;
+}
+
+.hist-rec::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  border-radius: 0.9rem 0 0 0.9rem;
+  background: linear-gradient(180deg, #f472b6, #a78bfa);
+  opacity: 0.85;
+}
+
+.hist-rec__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.55rem;
+}
+
+.hist-rec__badge {
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.58rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.hist-rec__badge.tone-warn {
+  background: rgba(251, 191, 36, 0.14);
+  border-color: rgba(251, 191, 36, 0.38);
+  color: var(--bccr-warning-text);
+}
+
+.hist-rec__badge.tone-info {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(96, 165, 250, 0.32);
+  color: var(--bccr-pill-text);
+}
+
+.hist-rec__badge.tone-ok {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(74, 222, 128, 0.34);
+  color: var(--bccr-success-text);
+}
+
+.hist-rec__badge.tone-bad {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.3);
+  color: var(--bccr-danger);
+}
+
+.hist-rec__badge.tone-muted {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.24);
+  color: var(--bccr-muted);
+}
+
+.hist-rec__time {
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--bccr-muted);
+  white-space: nowrap;
+}
+
+.hist-rec__title {
+  margin: 0 0 0.4rem;
+  font-size: 1.02rem;
+  font-weight: 720;
+  line-height: 1.35;
+  color: #9d174d;
+  letter-spacing: -0.01em;
+}
+
+.hist-rec__author {
+  margin: 0 0 0.45rem;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  color: var(--bccr-text);
+}
+
+.hist-rec__k {
+  display: inline-block;
+  min-width: 3.5rem;
+  margin-right: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: var(--bccr-muted);
+  letter-spacing: 0.03em;
+}
+
+.hist-rec__v {
+  color: var(--bccr-text);
+}
+
+.hist-rec__workid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.hist-rec__id-btn {
+  padding: 0.12rem 0.35rem;
+  margin: 0;
+  border: none;
+  border-radius: 0.35rem;
+  background: rgba(244, 114, 182, 0.12);
+  color: #db2777;
+  font-size: 0.78rem;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.hist-rec__id-btn:hover {
+  background: rgba(244, 114, 182, 0.2);
+  color: #9d174d;
+}
+
+.hist-rec__meta {
+  margin: 0;
+  padding: 0.55rem 0 0;
+  border-top: 1px dashed rgba(148, 163, 184, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.hist-rec__meta-row {
+  display: grid;
+  grid-template-columns: 4.25rem 1fr;
+  gap: 0.35rem 0.5rem;
+  font-size: 0.78rem;
+  align-items: baseline;
+}
+
+.hist-rec__meta-row dt {
+  margin: 0;
+  color: var(--bccr-muted);
+  font-weight: 600;
+}
+
+.hist-rec__meta-row dd {
+  margin: 0;
+  color: var(--bccr-muted);
+  word-break: break-all;
+}
+
+.hist-rec__remark {
+  margin: 0.55rem 0 0;
+  padding: 0.5rem 0.55rem;
+  border-radius: 0.45rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--bccr-text);
+  background: var(--bccr-hover);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.hist-rec__remark-k {
+  display: block;
+  margin-bottom: 0.2rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+  color: var(--bccr-muted);
+  letter-spacing: 0.04em;
 }
 
 .case-id {
   font-size: 0.74rem;
-  color: rgba(148, 163, 184, 0.95);
+  color: var(--bccr-label);
 }
 
 .case-title {
   margin: 0 0 0.65rem;
   font-size: 1.02rem;
   font-weight: 700;
-  color: #fdf2f8;
+  color: #9d174d;
   line-height: 1.35;
 }
 
@@ -625,7 +1175,7 @@ loadPending()
 }
 
 .meta-v {
-  color: #e2e8f0;
+  color: var(--bccr-text);
   word-break: break-all;
 }
 
@@ -646,7 +1196,7 @@ loadPending()
 }
 
 .link-work:hover {
-  color: #fce7f3;
+  color: #9d174d;
 }
 
 .reason-block {
@@ -676,7 +1226,7 @@ loadPending()
   display: inline-block;
   font-size: 0.82rem;
   font-weight: 650;
-  color: #fbcfe8;
+  color: #db2777;
 }
 
 .reason-detail {
@@ -719,10 +1269,10 @@ loadPending()
 .btn-deny {
   padding: 0.48rem 1.15rem;
   border-radius: 0.5rem;
-  border: 1px solid rgba(248, 113, 113, 0.45);
+  border: 1px solid var(--bccr-btn-danger-border);
   font-size: 0.86rem;
   font-weight: 700;
-  color: #fecaca;
+  color: var(--bccr-danger);
   cursor: pointer;
   background: rgba(248, 113, 113, 0.1);
   transition:
@@ -748,7 +1298,7 @@ loadPending()
 .hist-line {
   margin: 0.25rem 0 0;
   font-size: 0.8rem;
-  color: #e2e8f0;
+  color: var(--bccr-text);
 }
 
 .link-inline {
@@ -767,40 +1317,77 @@ loadPending()
 
 .action-dock {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  inset: 0;
   z-index: 50;
   display: flex;
+  align-items: center;
   justify-content: center;
-  padding: 0.75rem 1rem calc(0.75rem + env(safe-area-inset-bottom, 0));
-  background: linear-gradient(180deg, transparent, rgba(12, 18, 34, 0.92) 20%);
-  pointer-events: none;
+  padding: 1rem;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 0));
+  box-sizing: border-box;
+  background: rgba(12, 18, 34, 0.72);
+  backdrop-filter: blur(8px);
 }
 
 .dock-inner {
-  pointer-events: auto;
   width: 100%;
-  max-width: 520px;
-  padding: 1rem 1.15rem;
-  border-radius: 0.85rem 0.85rem 0 0;
-  border: 1px solid rgba(244, 114, 182, 0.25);
-  border-bottom: none;
-  background: rgba(15, 23, 42, 0.96);
-  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(14px);
+  max-width: 480px;
+  max-height: min(90vh, 560px);
+  overflow: auto;
+  padding: 1.15rem 1.2rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(244, 114, 182, 0.28);
+  background: var(--bccr-surface);
+  box-shadow: 0 24px 64px var(--bccr-overlay);
 }
 
 .dock-title {
   margin: 0 0 0.25rem;
   font-size: 1rem;
   font-weight: 700;
-  color: #fce7f3;
+  color: #9d174d;
 }
 
 .dock-sub {
-  margin: 0 0 0.75rem;
+  margin: 0 0 0.5rem;
   font-size: 0.76rem;
+  color: var(--bccr-muted);
+}
+
+.dock-extra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.65rem;
+  margin-bottom: 0.75rem;
+}
+
+.btn-dock-link {
+  padding: 0.35rem 0.65rem;
+  border-radius: 0.45rem;
+  border: 1px solid var(--bccr-accent-border);
+  background: var(--bccr-accent-soft);
+  color: var(--bccr-pill-text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.btn-dock-link:hover:not(:disabled) {
+  background: var(--bccr-pill-bg);
+  border-color: rgba(147, 197, 253, 0.45);
+}
+
+.btn-dock-link:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dock-extra-hint {
+  font-size: 0.72rem;
   color: var(--bccr-muted);
 }
 

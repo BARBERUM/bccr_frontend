@@ -1,6 +1,17 @@
 import { normalizeMediaSrc, request, requestMultipart } from './client'
 
 /**
+ * 路由参数、query、剪贴板等处带入的作品 ID：去空白、去掉误粘贴的尾部 `?`。
+ * 注意：若后端在审核待办里把数据库主键数字放在 `workId` 里，而详情接口要业务字符串 ID，需后端对齐字段。
+ * @param {unknown} raw
+ */
+export function normalizeWorkIdParam(raw) {
+  let s = String(raw ?? '').trim()
+  if (s.endsWith('?')) s = s.slice(0, -1).trim()
+  return s
+}
+
+/**
  * 登记作品（POST /api/work/register，multipart）
  * 与 BCCRight WorkController：file?、workId、workName、workType、featureCode?、ipfsHash?、description?
  * @param {{
@@ -42,7 +53,7 @@ export function registerWork(params) {
  * @param {string} workId
  */
 export function recheckWork(workId) {
-  const id = encodeURIComponent(String(workId))
+  const id = encodeURIComponent(normalizeWorkIdParam(workId))
   return request(`/api/work/${id}/recheck`, { method: 'POST' })
 }
 
@@ -72,6 +83,66 @@ export function fetchWorkList(params = {}) {
 }
 
 /**
+ * 作品高级搜索（GET /api/work/search，与 WorkController 对齐）
+ * 前端已收敛参数：不含状态、描述、作者地址、上链时间、是否上链、浏览/评论/举报/评分阈值筛选。
+ * @param {{
+ *   pageNum?: number,
+ *   pageSize?: number,
+ *   page?: number,
+ *   size?: number,
+ *   workId?: string,
+ *   workName?: string,
+ *   workType?: string,
+ *   authorName?: string,
+ *   createStart?: string,
+ *   createEnd?: string,
+ *   fileSizeMin?: number,
+ *   fileSizeMax?: number,
+ *   likeMin?: number,
+ *   sortBy?: string,
+ *   sortDir?: string,
+ *   authorAddress?: string,
+ * }} [params]
+ */
+export function fetchWorkSearch(params = {}) {
+  const pageNum = Math.max(1, Number(params.pageNum ?? params.page) || 1)
+  let pageSize = Math.min(50, Math.max(1, Number(params.pageSize ?? params.size) || 10))
+  const q = new URLSearchParams()
+  q.set('pageNum', String(pageNum))
+  q.set('pageSize', String(pageSize))
+
+  const strKeys = [
+    ['workId', params.workId],
+    ['workName', params.workName],
+    ['workType', params.workType],
+    ['authorName', params.authorName],
+    ['authorAddress', params.authorAddress],
+    ['createStart', params.createStart],
+    ['createEnd', params.createEnd],
+    ['sortBy', params.sortBy],
+    ['sortDir', params.sortDir],
+  ]
+  for (const [k, v] of strKeys) {
+    const s = v != null ? String(v).trim() : ''
+    if (s) q.set(k, s)
+  }
+
+  const intKeys = [
+    ['fileSizeMin', params.fileSizeMin],
+    ['fileSizeMax', params.fileSizeMax],
+    ['likeMin', params.likeMin],
+  ]
+  for (const [k, v] of intKeys) {
+    if (v == null || v === '') continue
+    const n = Number(v)
+    if (!Number.isFinite(n)) continue
+    q.set(k, String(Math.trunc(n)))
+  }
+
+  return request(`/api/work/search?${q.toString()}`, { method: 'GET' })
+}
+
+/**
  * 当前用户本人作品分页（GET /api/work/my?keyword=&workName=&page=&size=）
  * 与路由「我的作品」说明一致；keyword / workName 可选，用于授权页按作品名关键字筛选（与后端参数名对齐即可）。
  * @param {{ page?: number, size?: number, keyword?: string, workName?: string, type?: string }} [params]
@@ -97,8 +168,27 @@ export function fetchMyWorkList(params = {}) {
 }
 
 export function fetchWorkDetail(workId) {
-  const id = encodeURIComponent(String(workId))
+  const id = encodeURIComponent(normalizeWorkIdParam(workId))
   return request(`/api/work/${id}`)
+}
+
+/**
+ * 删除本人作品（DELETE /api/work/{workId}）
+ * @param {string} workId
+ */
+export function deleteWork(workId) {
+  const id = encodeURIComponent(normalizeWorkIdParam(workId))
+  return request(`/api/work/${id}`, { method: 'DELETE' })
+}
+
+/**
+ * 按指纹查询链上原始凭证（GET /api/work/fingerprint/{fingerprint}/onchain）
+ * @param {string} fingerprint
+ */
+export function fetchWorkOnChainByFingerprint(fingerprint) {
+  const fp = encodeURIComponent(String(fingerprint ?? '').trim())
+  if (!fp) return Promise.reject(new Error('缺少指纹'))
+  return request(`/api/work/fingerprint/${fp}/onchain`, { method: 'GET' })
 }
 
 export function normalizeListPage(data) {
@@ -121,10 +211,14 @@ export function normalizeListPage(data) {
 
   let page = 1
   if (d.current != null) page = Number(d.current) || 1
+  else if (d.pageNum != null) page = Number(d.pageNum) || 1
   else if (typeof d.number === 'number') page = d.number + 1
   else if (d.page != null) page = Number(d.page) || 1
 
-  const pages = total === 0 ? 0 : Math.ceil(total / size)
+  let pages = Number(d.pages)
+  if (!Number.isFinite(pages) || pages < 0) {
+    pages = total === 0 ? 0 : Math.ceil(total / size)
+  }
 
   return { items, total, page, size, pages }
 }
@@ -242,6 +336,56 @@ export function pickDisplayImageUrl(w) {
   return ''
 }
 
+/**
+ * 作者展示名（与链上地址区分）：优先接口显式姓名字段，其次嵌套 user / creator 等。
+ * @param {Record<string, unknown>} w
+ */
+export function pickAuthorDisplayName(w) {
+  if (!w || typeof w !== 'object') return ''
+  const o = /** @type {Record<string, unknown>} */ (w)
+  const direct = [
+    'authorName',
+    'authorDisplayName',
+    'creatorName',
+    'ownerName',
+    'realName',
+    'realname',
+    'userRealName',
+    'publisherName',
+    'registerUserName',
+  ]
+  for (const k of direct) {
+    const v = o[k]
+    if (typeof v === 'string' && v.trim()) return v.trim()
+  }
+  const fallbackKeys = ['nickname', 'nickName', 'displayName', 'username', 'loginName', 'account', 'userName']
+  for (const k of fallbackKeys) {
+    const v = o[k]
+    if (typeof v === 'string' && v.trim()) return v.trim()
+  }
+  for (const nestKey of ['user', 'owner', 'creator', 'authorUser', 'publisher', 'registerUser']) {
+    const nested = o[nestKey]
+    if (!nested || typeof nested !== 'object') continue
+    const n = /** @type {Record<string, unknown>} */ (nested)
+    for (const k of ['nickname', 'nickName', 'name', 'realName', 'username', 'loginName', 'account']) {
+      const v = n[k]
+      if (typeof v === 'string' && v.trim()) return v.trim()
+    }
+  }
+  return ''
+}
+
+/**
+ * @param {unknown} val
+ * @returns {number | null}
+ */
+function pickNonNegInt(val) {
+  if (val == null || val === '') return null
+  const n = typeof val === 'number' ? val : parseInt(String(val), 10)
+  if (!Number.isFinite(n) || n < 0) return null
+  return n
+}
+
 export function formatWorkSummary(w) {
   const kind = workKind(w.type ?? w.workType ?? w.mediaType)
   const cover = pickListPreviewImageUrl(w, kind)
@@ -253,6 +397,13 @@ export function formatWorkSummary(w) {
     type: String(w.type ?? w.workType ?? w.mediaType ?? ''),
     kind,
     author: String(w.authorAddress ?? w.author ?? w.authorName ?? ''),
+    authorName: pickAuthorDisplayName(
+      /** @type {Record<string, unknown>} */ (typeof w === 'object' && w ? w : {}),
+    ),
+    likeCount: pickNonNegInt(w.likeCount ?? w.likeNum ?? w.likes ?? w.thumbCount),
+    commentCount: pickNonNegInt(
+      w.commentCount ?? w.comments ?? w.commentNum ?? w.commentsCount,
+    ),
     cover,
     textPreview: pickTextPreview(w, kind === 'text' ? 320 : 160),
     fingerprint: String(w.fingerprint ?? w.fp ?? ''),

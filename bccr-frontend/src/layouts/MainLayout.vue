@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { navItemsForUser } from '@/config/nav'
@@ -9,6 +9,23 @@ import * as userApi from '@/api/user'
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+
+/** 左侧导航：鼠标移入展开，移出后短暂延迟收起，便于移入菜单项 */
+const navDockOpen = ref(false)
+let navDockLeaveTimer = null
+function onNavDockEnter() {
+  if (navDockLeaveTimer) {
+    clearTimeout(navDockLeaveTimer)
+    navDockLeaveTimer = null
+  }
+  navDockOpen.value = true
+}
+function onNavDockLeave() {
+  navDockLeaveTimer = setTimeout(() => {
+    navDockOpen.value = false
+    navDockLeaveTimer = null
+  }, 220)
+}
 
 const loadError = ref('')
 const avatarUrl = ref('')
@@ -99,6 +116,10 @@ watch(
   },
 )
 
+onUnmounted(() => {
+  if (navDockLeaveTimer) clearTimeout(navDockLeaveTimer)
+})
+
 function logout() {
   auth.logout()
   router.replace({ name: 'login' })
@@ -112,27 +133,37 @@ function isNavActive(to) {
 
 <template>
   <div class="layout">
-    <aside class="aside" aria-label="主导航">
-      <div class="brand">
-        <span class="logo">BCCR</span>
-        <div class="brand-text">
-          <span class="name">版权保护系统</span>
-          <span class="sub">指纹 · 查重 · 授权</span>
-        </div>
+    <div
+      class="nav-flyout"
+      :class="{ 'is-open': navDockOpen }"
+      @mouseenter="onNavDockEnter"
+      @mouseleave="onNavDockLeave"
+    >
+      <div class="nav-rail" aria-hidden="true">
+        <span class="nav-rail-mark">菜单</span>
       </div>
+      <aside class="aside" aria-label="主导航">
+        <div class="brand">
+          <span class="logo">BCCR</span>
+          <div class="brand-text">
+            <span class="name">版权保护系统</span>
+            <span class="sub">指纹 · 查重 · 授权</span>
+          </div>
+        </div>
 
-      <nav class="nav">
-        <RouterLink
-          v-for="item in filteredNav"
-          :key="item.to"
-          :to="item.to"
-          class="nav-item"
-          :class="{ active: isNavActive(item.to) }"
-        >
-          {{ item.label }}
-        </RouterLink>
-      </nav>
-    </aside>
+        <nav class="nav">
+          <RouterLink
+            v-for="item in filteredNav"
+            :key="item.to"
+            :to="item.to"
+            class="nav-item"
+            :class="{ active: isNavActive(item.to) }"
+          >
+            {{ item.label }}
+          </RouterLink>
+        </nav>
+      </aside>
+    </div>
 
     <div class="main-col">
       <header class="topbar">
@@ -155,7 +186,7 @@ function isNavActive(to) {
         </div>
       </header>
 
-      <main class="content">
+      <main class="content bccr-scroll-slim">
         <RouterView />
       </main>
     </div>
@@ -164,18 +195,66 @@ function isNavActive(to) {
 
 <style scoped>
 .layout {
-  display: grid;
-  grid-template-columns: 240px 1fr;
+  display: flex;
+  flex-direction: column;
   min-height: 100%;
+  min-height: 100dvh;
+  position: relative;
+}
+
+.nav-flyout {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 300;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  width: min(268px, 90vw);
+  max-width: 100%;
+  transform: translateX(calc(-100% + 13px));
+  transition:
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.25s ease;
+  box-shadow: none;
+  pointer-events: auto;
+}
+
+.nav-flyout.is-open {
+  transform: translateX(0);
+  box-shadow: var(--bccr-shadow-lg);
+}
+
+.nav-rail {
+  flex-shrink: 0;
+  width: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bccr-nav-bg);
+  border-right: 1px solid var(--bccr-border);
+  cursor: default;
+}
+
+.nav-rail-mark {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  color: var(--bccr-muted);
+  user-select: none;
 }
 
 .aside {
-  position: relative;
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.85);
-  backdrop-filter: blur(12px);
+  border-right: none;
+  background: var(--bccr-nav-bg);
+  backdrop-filter: blur(14px);
 }
 
 .brand {
@@ -239,20 +318,21 @@ function isNavActive(to) {
 
 .nav-item:hover {
   color: var(--bccr-text);
-  background: rgba(148, 163, 184, 0.1);
+  background: var(--bccr-hover);
 }
 
 .nav-item.active {
-  color: #fff;
-  background: rgba(59, 130, 246, 0.28);
+  color: var(--bccr-accent-text);
+  background: var(--bccr-nav-active-bg, var(--bccr-accent-soft));
   font-weight: 600;
 }
 
 .main-col {
   display: flex;
   flex-direction: column;
+  flex: 1;
   min-width: 0;
-  min-height: 100%;
+  min-height: 0;
 }
 
 .topbar {
@@ -263,7 +343,7 @@ function isNavActive(to) {
   flex-wrap: wrap;
   padding: 0.85rem 1.35rem;
   border-bottom: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.55);
+  background: var(--bccr-topbar-bg);
   backdrop-filter: blur(10px);
 }
 
@@ -294,7 +374,7 @@ function isNavActive(to) {
 }
 
 .user-chip:hover {
-  background: rgba(148, 163, 184, 0.12);
+  background: var(--bccr-hover);
 }
 
 .avatar-wrap {
@@ -304,7 +384,7 @@ function isNavActive(to) {
   border-radius: 50%;
   overflow: hidden;
   border: 1px solid var(--bccr-border);
-  background: rgba(30, 41, 59, 0.95);
+  background: var(--bccr-surface-muted);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -319,7 +399,7 @@ function isNavActive(to) {
 .avatar-letter {
   font-size: 0.95rem;
   font-weight: 700;
-  color: #bfdbfe;
+  color: var(--bccr-accent);
   line-height: 1;
 }
 
@@ -335,9 +415,9 @@ function isNavActive(to) {
   font-size: 0.72rem;
   padding: 0.15rem 0.45rem;
   border-radius: 999px;
-  background: rgba(59, 130, 246, 0.18);
-  border: 1px solid rgba(59, 130, 246, 0.35);
-  color: #bfdbfe;
+  background: var(--bccr-pill-bg);
+  border: 1px solid var(--bccr-accent-border);
+  color: var(--bccr-pill-text);
 }
 
 .btn-out {
@@ -352,7 +432,7 @@ function isNavActive(to) {
 }
 
 .btn-out:hover {
-  background: rgba(59, 130, 246, 0.12);
+  background: var(--bccr-accent-soft);
 }
 
 .warn {
@@ -363,34 +443,14 @@ function isNavActive(to) {
 
 .content {
   flex: 1;
-  padding: 1.35rem 1.35rem 2rem;
-  overflow-x: auto;
-}
-
-@media (max-width: 860px) {
-  .layout {
-    grid-template-columns: 1fr;
-  }
-
-  .aside {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    border-right: none;
-    border-bottom: 1px solid var(--bccr-border);
-  }
-
-  .brand {
-    border-bottom: none;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .nav {
-    flex-direction: row;
-    flex-wrap: wrap;
-    flex: 1 1 100%;
-    padding: 0 0.6rem 0.65rem;
-  }
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 1.1rem 1.15rem 2rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* 与全局 body 一致：内部滚动到底时不再透出浅色底 */
+  background: var(--bccr-page-bg);
+  background-color: var(--bccr-bg-1);
 }
 </style>

@@ -87,8 +87,8 @@ watch(file, (v) => {
   width: 100%;
   padding: 1.35rem 1rem;
   border-radius: 0.85rem;
-  border: 2px dashed rgba(148, 163, 184, 0.28);
-  background: linear-gradient(165deg, rgba(30, 41, 59, 0.5), rgba(15, 23, 42, 0.35));
+  border: 2px dashed var(--bccr-upload-border);
+  background: var(--bccr-upload-bg);
   color: inherit;
   cursor: pointer;
   display: flex;
@@ -102,34 +102,36 @@ watch(file, (v) => {
 }
 
 .upload-zone:hover {
-  border-color: rgba(56, 189, 248, 0.4);
-  box-shadow: 0 8px 28px rgba(34, 211, 238, 0.1);
+  border-color: var(--bccr-upload-hover-border);
+  background: var(--bccr-upload-hover-bg);
+  box-shadow: var(--bccr-shadow-sm);
 }
 
 .upload-zone.drag {
-  border-color: rgba(103, 232, 249, 0.65);
-  background: rgba(34, 211, 238, 0.08);
+  border-color: var(--bccr-option-active-border);
+  background: var(--bccr-upload-drag-bg);
 }
 
 .upload-zone.has {
   border-style: solid;
-  border-color: rgba(52, 211, 153, 0.4);
-  background: linear-gradient(165deg, rgba(16, 185, 129, 0.08), rgba(15, 23, 42, 0.4));
+  border-color: var(--bccr-upload-has-border);
+  background: var(--bccr-upload-has-bg);
 }
 
 .upload-ic {
-  color: rgba(103, 232, 249, 0.85);
+  color: var(--bccr-accent);
+  opacity: 0.85;
 }
 
 .upload-title {
   font-size: 0.95rem;
   font-weight: 650;
-  color: #f1f5f9;
+  color: var(--bccr-text);
 }
 
 .upload-sub {
   font-size: 0.78rem;
-  color: var(--bccr-muted, #94a3b8);
+  color: var(--bccr-muted);
   text-align: center;
   max-width: 22rem;
   line-height: 1.45;
@@ -148,14 +150,14 @@ watch(file, (v) => {
   padding: 0;
   font-size: 0.82rem;
   font-weight: 600;
-  color: var(--bccr-accent, #3b82f6);
+  color: var(--bccr-accent);
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 
 .btn-text.danger {
-  color: #f87171;
+  color: var(--bccr-danger);
 }
 
 .sr-only {

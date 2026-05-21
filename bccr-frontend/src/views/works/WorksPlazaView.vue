@@ -14,8 +14,27 @@ const totalPages = ref(0)
 
 const page = ref(1)
 const pageSize = ref(10)
-const keyword = ref('')
+
+/** 兼容旧路由 ?keyword= */
+const workName = ref('')
+const workId = ref('')
+const authorName = ref('')
+const createStart = ref('')
+const createEnd = ref('')
+const fileMinMb = ref('')
+const fileMaxMb = ref('')
+const likeMin = ref('')
+const sortBy = ref('createdAt')
+const sortDir = ref('desc')
 const typeFilter = ref('')
+
+const SORT_OPTIONS = [
+  { value: 'createdAt', label: '登记时间' },
+  { value: 'likeCount', label: '点赞数' },
+  { value: 'viewCount', label: '浏览量' },
+  { value: 'commentCount', label: '评论数' },
+  { value: 'averageRating', label: '评分' },
+]
 
 const TYPE_OPTIONS = [
   { value: '', label: '全部类型' },
@@ -30,11 +49,42 @@ const pageInput = ref(1)
 const hasPrev = computed(() => page.value > 1)
 const hasNext = computed(() => totalPages.value > 0 && page.value < totalPages.value)
 
+/** @param {unknown} v */
+function strFromQuery(v) {
+  return typeof v === 'string' ? v : ''
+}
+
+function numStrFromQuery(v) {
+  if (v == null || v === '') return ''
+  const n = Number(v)
+  return Number.isFinite(n) ? String(n) : ''
+}
+
+function mbToBytes(s) {
+  const n = Number(String(s ?? '').trim())
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  return Math.round(n * 1024 * 1024)
+}
+
+function intOrUndef(s) {
+  const n = Number(String(s ?? '').trim())
+  return Number.isFinite(n) ? Math.trunc(n) : undefined
+}
+
 function syncFiltersFromRoute() {
   const q = route.query
   page.value = Math.max(1, parseInt(String(q.page || '1'), 10) || 1)
   pageSize.value = Math.min(50, Math.max(1, parseInt(String(q.size || '10'), 10) || 10))
-  keyword.value = typeof q.keyword === 'string' ? q.keyword : ''
+  workName.value = strFromQuery(q.workName) || strFromQuery(q.keyword)
+  workId.value = strFromQuery(q.workId)
+  authorName.value = strFromQuery(q.authorName)
+  createStart.value = strFromQuery(q.createStart)
+  createEnd.value = strFromQuery(q.createEnd)
+  fileMinMb.value = numStrFromQuery(q.fsMin)
+  fileMaxMb.value = numStrFromQuery(q.fsMax)
+  likeMin.value = numStrFromQuery(q.likeMin)
+  sortBy.value = strFromQuery(q.sortBy) || 'createdAt'
+  sortDir.value = String(q.sortDir || '').toLowerCase() === 'asc' ? 'asc' : 'desc'
   typeFilter.value = typeof q.type === 'string' ? q.type : ''
   pageInput.value = page.value
 }
@@ -43,35 +93,53 @@ function pushRouteQuery() {
   const q = /** @type {Record<string, string>} */ ({})
   q.page = String(page.value)
   q.size = String(pageSize.value)
-  if (keyword.value.trim()) q.keyword = keyword.value.trim()
+  const set = (k, v) => {
+    const s = String(v ?? '').trim()
+    if (s) q[k] = s
+  }
+  set('workName', workName.value)
+  set('workId', workId.value)
+  set('authorName', authorName.value)
+  set('createStart', createStart.value)
+  set('createEnd', createEnd.value)
+  set('fsMin', fileMinMb.value)
+  set('fsMax', fileMaxMb.value)
+  set('likeMin', likeMin.value)
+  if (sortBy.value && sortBy.value !== 'createdAt') q.sortBy = sortBy.value
+  if (sortDir.value !== 'desc') q.sortDir = sortDir.value
   if (typeFilter.value) q.type = typeFilter.value
   router.replace({ query: q })
+}
+
+function buildSearchParams() {
+  return {
+    pageNum: page.value,
+    pageSize: pageSize.value,
+    workId: workId.value.trim() || undefined,
+    workName: workName.value.trim() || undefined,
+    workType: typeFilter.value || undefined,
+    authorName: authorName.value.trim() || undefined,
+    createStart: createStart.value || undefined,
+    createEnd: createEnd.value || undefined,
+    fileSizeMin: mbToBytes(fileMinMb.value),
+    fileSizeMax: mbToBytes(fileMaxMb.value),
+    likeMin: intOrUndef(likeMin.value),
+    sortBy: sortBy.value || 'createdAt',
+    sortDir: sortDir.value || 'desc',
+  }
 }
 
 async function loadList() {
   loading.value = true
   errorMsg.value = ''
   try {
-    const data = await workApi.fetchWorkList({
-      page: page.value,
-      size: pageSize.value,
-      type: typeFilter.value || undefined,
-      keyword: keyword.value.trim() || undefined,
-    })
+    const data = await workApi.fetchWorkSearch(buildSearchParams())
     const norm = workApi.normalizeListPage(data)
-    const mapped = norm.items.map((row) =>
+    items.value = norm.items.map((row) =>
       workApi.formatWorkSummary(
         /** @type {Record<string, unknown>} */ (typeof row === 'object' && row ? row : {}),
       ),
     )
-    items.value = typeFilter.value
-      ? mapped.filter((w) =>
-          workApi.matchesWorkTypeFilter(
-            /** @type {Record<string, unknown>} */ (w.raw || {}),
-            typeFilter.value,
-          ),
-        )
-      : mapped
     total.value = norm.total
     const computedPages =
       norm.pages ||
@@ -123,7 +191,16 @@ function applySearch() {
 }
 
 function clearSearch() {
-  keyword.value = ''
+  workName.value = ''
+  workId.value = ''
+  authorName.value = ''
+  createStart.value = ''
+  createEnd.value = ''
+  fileMinMb.value = ''
+  fileMaxMb.value = ''
+  likeMin.value = ''
+  sortBy.value = 'createdAt'
+  sortDir.value = 'desc'
   typeFilter.value = ''
   page.value = 1
   pushRouteQuery()
@@ -170,40 +247,87 @@ watch(
 </script>
 
 <template>
-  <div class="plaza">
-    <header class="toolbar">
-      <div class="filters">
-        <label class="field">
-          <span class="lbl">关键词</span>
-          <input
-            v-model.trim="keyword"
-            type="search"
-            placeholder="标题等关键词"
-            class="inp"
-            @keydown.enter.prevent="applySearch"
-          />
-        </label>
-        <label class="field">
-          <span class="lbl">类型</span>
-          <select v-model="typeFilter" class="inp select" @change="applySearch">
-            <option v-for="opt in TYPE_OPTIONS" :key="opt.label + opt.value" :value="opt.value">
-              {{ opt.label }}
-            </option>
-          </select>
-        </label>
-        <button type="button" class="btn primary" :disabled="loading" @click="applySearch">
-          搜索
-        </button>
-        <button type="button" class="btn ghost" :disabled="loading" @click="clearSearch">
-          重置
-        </button>
-      </div>
-      <p class="meta">
-        共 <strong>{{ total }}</strong> 条 · 第 {{ page }} / {{ Math.max(1, totalPages) }} 页
-      </p>
-    </header>
+  <div class="page-shell">
+    <div class="plaza">
 
-    <p v-if="errorMsg" class="err">{{ errorMsg }}</p>
+      <section class="toolbar">
+        <div class="filters filters-main">
+          <label class="field grow">
+            <span class="lbl">作品名称</span>
+            <input
+              v-model.trim="workName"
+              type="search"
+              placeholder="模糊匹配作品名"
+              class="inp"
+              @keydown.enter.prevent="applySearch"
+            />
+          </label>
+          <label class="field">
+            <span class="lbl">类型</span>
+            <select v-model="typeFilter" class="inp select" @change="applySearch">
+              <option v-for="opt in TYPE_OPTIONS" :key="opt.label + opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="lbl">排序</span>
+            <select v-model="sortBy" class="inp select" @change="applySearch">
+              <option v-for="opt in SORT_OPTIONS" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="lbl">方向</span>
+            <select v-model="sortDir" class="inp select" @change="applySearch">
+              <option value="desc">降序</option>
+              <option value="asc">升序</option>
+            </select>
+          </label>
+          <button type="button" class="btn primary" :disabled="loading" @click="applySearch">搜索</button>
+          <button type="button" class="btn ghost" :disabled="loading" @click="clearSearch">重置</button>
+        </div>
+
+        <details class="adv-details">
+          <summary class="adv-sum">更多条件</summary>
+          <div class="filters filters-adv">
+            <label class="field">
+              <span class="lbl">作品 ID</span>
+              <input v-model.trim="workId" type="text" class="inp" placeholder="精确" />
+            </label>
+            <label class="field">
+              <span class="lbl">作者名</span>
+              <input v-model.trim="authorName" type="text" class="inp" placeholder="模糊" />
+            </label>
+            <label class="field">
+              <span class="lbl">登记 ≥</span>
+              <input v-model="createStart" type="date" class="inp" />
+            </label>
+            <label class="field">
+              <span class="lbl">登记 ≤</span>
+              <input v-model="createEnd" type="date" class="inp" />
+            </label>
+            <label class="field">
+              <span class="lbl">文件 ≥ MB</span>
+              <input v-model.trim="fileMinMb" type="number" min="0" step="0.01" class="inp num" />
+            </label>
+            <label class="field">
+              <span class="lbl">文件 ≤ MB</span>
+              <input v-model.trim="fileMaxMb" type="number" min="0" step="0.01" class="inp num" />
+            </label>
+            <label class="field">
+              <span class="lbl">点赞 ≥</span>
+              <input v-model.trim="likeMin" type="number" min="0" class="inp num" />
+            </label>
+          </div>
+        </details>
+        <p class="meta">
+          共 <strong>{{ total }}</strong> 条 · 第 {{ page }} / {{ Math.max(1, totalPages) }} 页
+        </p>
+      </section>
+
+      <p v-if="errorMsg" class="err">{{ errorMsg }}</p>
 
     <div v-if="loading && !items.length" class="muted center">加载中…</div>
 
@@ -229,7 +353,10 @@ watch(
             <p class="thumb-text">{{ w.textPreview || '（列表未返回正文摘要，可进入详情查看）' }}</p>
           </div>
           <img v-else-if="w.cover" :src="w.cover" :alt="w.title" />
-          <div v-else class="thumb-ph">{{ formatType(w.type).charAt(0) || '作' }}</div>
+          <div v-else class="thumb-ph-wrap">
+            <span class="thumb-ph">{{ formatType(w.type).charAt(0) || '作' }}</span>
+            <p class="thumb-ph-sub">{{ formatType(w.type) }}</p>
+          </div>
         </div>
         <div class="body">
           <h3 class="title">{{ w.title }}</h3>
@@ -238,6 +365,10 @@ watch(
             <span class="fp" :title="w.fingerprint || ''">{{
               w.fingerprint ? `${String(w.fingerprint).slice(0, 12)}…` : '指纹 —'
             }}</span>
+          </p>
+          <p class="card-stats" aria-label="点赞与评论">
+            <span class="stat">赞 {{ w.likeCount ?? '—' }}</span>
+            <span class="stat">评 {{ w.commentCount ?? '—' }}</span>
           </p>
           <p class="author">作者地址 · {{ w.author || '—' }}</p>
           <time class="time">{{ formatTime(w.createdAt) }}</time>
@@ -270,27 +401,135 @@ watch(
         下一页
       </button>
     </footer>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.page-shell {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  padding: 0.35rem 0 2.75rem;
+  box-sizing: border-box;
+}
+
 .plaza {
-  max-width: 1120px;
+  width: 100%;
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 0 1.1rem;
+  box-sizing: border-box;
+}
+
+.hero {
+  position: relative;
+  text-align: center;
+  margin-bottom: 1.35rem;
+  padding: 1.35rem 1.25rem 1.5rem;
+  border-radius: 1.05rem;
+  border: 1px solid rgba(139, 92, 246, 0.16);
+  background: var(--bccr-card);
+  box-shadow: 0 16px 40px var(--bccr-hover);
+  overflow: hidden;
+}
+
+.hero-bloom {
+  position: absolute;
+  width: 260px;
+  height: 260px;
+  right: -50px;
+  top: -100px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(167, 139, 250, 0.22) 0%,
+    rgba(99, 102, 241, 0.08) 50%,
+    transparent 72%
+  );
+  pointer-events: none;
+}
+
+.hero-title {
+  position: relative;
+  margin: 0 0 0.5rem;
+  font-size: 1.55rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  background: linear-gradient(118deg, #ede9fe 0%, #a78bfa 40%, #818cf8 72%, #cbd5e1 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hero-lead {
+  position: relative;
+  margin: 0 auto;
+  max-width: 36rem;
+  font-size: 0.88rem;
+  line-height: 1.62;
+  color: var(--bccr-muted);
 }
 
 .toolbar {
-  margin-bottom: 1.25rem;
-  padding: 1rem 1.15rem;
-  border-radius: 0.75rem;
-  border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.45);
+  margin-bottom: 1.35rem;
+  padding: 1.05rem 1.2rem 1.15rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: var(--bccr-media-bg);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.14);
 }
 
 .filters {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
+  justify-content: center;
   gap: 0.65rem 1rem;
+}
+
+.filters-main {
+  margin-bottom: 0.35rem;
+}
+
+.field.grow {
+  flex: 1 1 14rem;
+  min-width: 12rem;
+}
+
+.field.grow .inp {
+  min-width: 0;
+  width: 100%;
+}
+
+.adv-details {
+  margin-top: 0.35rem;
+  border-radius: 0.65rem;
+  border: 1px dashed rgba(148, 163, 184, 0.22);
+  padding: 0.35rem 0.75rem 0.75rem;
+  background: var(--bccr-hover);
+}
+
+.adv-sum {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--bccr-accent);
+  font-weight: 600;
+  list-style: none;
+}
+
+.adv-sum::-webkit-details-marker {
+  display: none;
+}
+
+.filters-adv {
+  margin-top: 0.65rem;
+  justify-content: flex-start;
+}
+
+.inp.mono {
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-size: 0.78rem;
 }
 
 .field {
@@ -309,7 +548,7 @@ watch(
   padding: 0.45rem 0.6rem;
   border-radius: 0.45rem;
   border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.65);
+  background: var(--bccr-card);
   color: var(--bccr-text);
   font-size: 0.9rem;
 }
@@ -333,10 +572,16 @@ watch(
   width: 3.5rem;
 }
 
+.filters-adv .inp.num {
+  width: 5.25rem;
+  min-width: 4.5rem;
+}
+
 .meta {
-  margin: 0.85rem 0 0;
+  margin: 1rem 0 0;
   font-size: 0.82rem;
   color: var(--bccr-muted);
+  text-align: center;
 }
 
 .meta strong {
@@ -381,6 +626,8 @@ watch(
 .err {
   color: var(--bccr-danger);
   font-size: 0.9rem;
+  text-align: center;
+  padding: 0.5rem 0 1rem;
 }
 
 .muted {
@@ -395,29 +642,37 @@ watch(
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 1rem;
-  margin: 0;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 1.05rem;
+  justify-content: center;
+  align-items: start;
+  margin: 0 auto;
   padding: 0;
   list-style: none;
+  max-width: 1120px;
 }
 
 .card {
   display: flex;
   flex-direction: column;
-  border-radius: 0.75rem;
-  border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.42);
+  width: 100%;
+  max-width: 300px;
+  justify-self: center;
+  min-height: 0;
+  border-radius: 0.85rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: var(--bccr-card);
   overflow: hidden;
   cursor: pointer;
   transition:
-    transform 0.15s ease,
-    border-color 0.15s,
-    box-shadow 0.15s;
+    transform 0.18s ease,
+    border-color 0.18s,
+    box-shadow 0.18s;
 }
 
 .card--text {
-  border-color: rgba(148, 163, 184, 0.22);
+  border-color: rgba(52, 211, 153, 0.22);
+  box-shadow: inset 0 1px 0 rgba(52, 211, 153, 0.06);
 }
 
 .card:hover {
@@ -431,18 +686,16 @@ watch(
   outline-offset: 2px;
 }
 
+/* 与图片作品同一宽高比，避免文本卡在网格里被邻列图像「拉高」 */
 .thumb {
+  position: relative;
+  flex-shrink: 0;
   aspect-ratio: 16 / 10;
-  background: rgba(30, 41, 59, 0.85);
+  background: var(--bccr-surface-muted);
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.card--text .thumb {
-  aspect-ratio: auto;
-  min-height: 7.75rem;
-  max-height: 12rem;
+  overflow: hidden;
 }
 
 .thumb img {
@@ -453,38 +706,40 @@ watch(
 
 .thumb--text {
   align-items: stretch;
+  background: linear-gradient(145deg, var(--bccr-surface), rgba(6, 78, 59, 0.35));
 }
 
 .thumb-text-wrap {
   width: 100%;
   height: 100%;
   min-height: 0;
-  padding: 0.55rem 0.75rem 0.65rem;
+  padding: 0.55rem 0.75rem 0.6rem;
   overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  background: linear-gradient(165deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.78));
-  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  box-sizing: border-box;
 }
 
 .thumb-text-label {
   flex-shrink: 0;
-  font-size: 0.7rem;
-  font-weight: 600;
-  color: rgba(148, 163, 184, 0.85);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bccr-success-text);
 }
 
 .thumb-text {
   margin: 0;
   flex: 1;
   min-height: 0;
-  font-size: 0.82rem;
-  line-height: 1.55;
-  color: #e2e8f0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--bccr-text);
   text-align: left;
   display: -webkit-box;
-  -webkit-line-clamp: 8;
+  -webkit-line-clamp: 5;
   -webkit-box-orient: vertical;
   overflow: hidden;
   word-break: break-word;
@@ -493,25 +748,47 @@ watch(
 .thumb-ph {
   font-size: 2rem;
   font-weight: 700;
-  color: rgba(148, 163, 184, 0.45);
+  color: var(--bccr-text-hint);
+}
+
+.thumb-ph-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  width: 100%;
+  height: 100%;
+  padding: 0.75rem;
+  box-sizing: border-box;
+}
+
+.thumb-ph-sub {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--bccr-muted);
 }
 
 .body {
-  padding: 0.85rem 1rem 1rem;
+  padding: 0.72rem 0.78rem 0.85rem;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  align-items: center;
+  text-align: center;
+  gap: 0.4rem;
 }
 
 .title {
   margin: 0;
-  font-size: 1rem;
+  font-size: 0.94rem;
   font-weight: 650;
-  line-height: 1.35;
+  line-height: 1.38;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  width: 100%;
 }
 
 .sub {
@@ -519,6 +796,7 @@ watch(
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
   gap: 0.35rem;
   font-size: 0.78rem;
   color: var(--bccr-muted);
@@ -527,13 +805,28 @@ watch(
 .tag {
   padding: 0.12rem 0.4rem;
   border-radius: 0.25rem;
-  background: rgba(59, 130, 246, 0.18);
-  color: #93c5fd;
+  background: var(--bccr-accent-soft);
+  color: var(--bccr-accent-text);
 }
 
 .fp {
   font-family: ui-monospace, monospace;
   font-size: 0.72rem;
+}
+
+.card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  margin: 0.35rem 0 0.25rem;
+  font-size: 0.78rem;
+  color: var(--bccr-muted);
+}
+
+.stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
 }
 
 .author {
@@ -543,11 +836,12 @@ watch(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 100%;
 }
 
 .time {
   font-size: 0.75rem;
-  color: rgba(148, 163, 184, 0.85);
+  color: var(--bccr-muted);
 }
 
 .pager {

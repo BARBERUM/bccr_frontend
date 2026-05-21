@@ -1,0 +1,109 @@
+/**
+ * 跨页面通用控件样式（与各页 scoped 中同名类保持一致时可复用变量）
+ */
+
+/* 主按钮 / 幽灵按钮（登录、作品广场等常见命名） */
+.btn.primary,
+.modal-btn.primary,
+.btn-reg,
+.btn.primary:not(:disabled) {
+  background: var(--bccr-btn-primary-bg);
+  color: var(--bccr-on-accent);
+  border: none;
+}
+
+.btn.primary:hover:not(:disabled),
+.modal-btn.primary:hover:not(:disabled),
+.btn-reg:hover:not(:disabled) {
+  background: var(--bccr-btn-primary-hover);
+}
+
+.btn.ghost,
+.modal-btn.ghost {
+  background: transparent;
+  border: 1px solid var(--bccr-border);
+  color: var(--bccr-muted);
+}
+
+.btn.ghost:hover:not(:disabled),
+.modal-btn.ghost:hover:not(:disabled) {
+  background: var(--bccr-btn-ghost-hover);
+  color: var(--bccr-text);
+}
+
+/* 管理/审核等页：查询、重置、刷新 */
+.btn-accent {
+  padding: 0.55rem 1rem;
+  border-radius: 0.55rem;
+  border: none;
+  font-weight: 650;
+  font-size: 0.88rem;
+  color: var(--bccr-on-accent);
+  cursor: pointer;
+  background: var(--bccr-btn-primary-bg);
+  box-shadow: var(--bccr-shadow-sm);
+  transition:
+    background 0.12s,
+    box-shadow 0.12s,
+    opacity 0.12s;
+}
+
+.btn-accent:hover:not(:disabled) {
+  background: var(--bccr-btn-primary-hover);
+  box-shadow: var(--bccr-shadow-md);
+}
+
+.btn-accent:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  padding: 0.52rem 0.85rem;
+  border-radius: 0.55rem;
+  border: 1px solid var(--bccr-btn-ghost-border);
+  background: var(--bccr-btn-ghost-bg);
+  color: var(--bccr-btn-ghost-text);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    color 0.12s;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--bccr-btn-ghost-hover-border);
+  background: var(--bccr-btn-ghost-hover-bg);
+  color: var(--bccr-btn-ghost-hover-text);
+}
+
+.btn-ghost:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-page {
+  padding: 0.42rem 0.85rem;
+  border-radius: 0.45rem;
+  border: 1px solid var(--bccr-btn-ghost-border);
+  background: var(--bccr-btn-ghost-bg);
+  color: var(--bccr-text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+}
+
+.btn-page:hover:not(:disabled) {
+  border-color: var(--bccr-btn-ghost-hover-border);
+  background: var(--bccr-btn-ghost-hover-bg);
+}
+
+.btn-page:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}

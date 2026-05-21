@@ -111,7 +111,14 @@ export function fetchAuthorizationByWorkId(workId, params = {}) {
 export function fetchAuthorizationFromMe(params = {}) {
   const page = Math.max(1, Number(params.page) || 1)
   const size = Math.min(50, Math.max(1, Number(params.size) || 10))
-  return request(`/api/auth/my/out?page=${page}&size=${size}`, {
+  const q = new URLSearchParams({
+    page: String(page),
+    size: String(size),
+  })
+  if (params.status != null && String(params.status).trim() !== '') {
+    q.set('status', String(params.status).trim())
+  }
+  return request(`/api/auth/my/out?${q.toString()}`, {
     method: 'GET',
   })
 }
@@ -126,4 +133,42 @@ export function fetchAuthorizationToMe(params = {}) {
   return request(`/api/auth/my/in?page=${page}&size=${size}`, {
     method: 'GET',
   })
+}
+
+/**
+ * 延续已过期授权（PUT /api/auth/{authId}/extend）
+ * 请求体 {@code newExpireTime}：yyyy-MM-ddTHH:mm:ss；不传或空表示改为永久
+ * @param {string} authId
+ * @param {{ newExpireTime?: string }} [options]
+ */
+export function extendAuth(authId, options = {}) {
+  const id = encodeURIComponent(String(authId).trim())
+  const json = {}
+  const exp = options.newExpireTime
+  if (exp != null && String(exp).trim() !== '') {
+    json.newExpireTime = String(exp).trim()
+  }
+  return request(`/api/auth/${id}/extend`, {
+    method: 'PUT',
+    json,
+  })
+}
+
+/**
+ * 刷新单条授权状态（检查是否过期）
+ * PUT /api/auth/{authId}/refresh
+ * @param {string} authId
+ */
+export function refreshAuthStatus(authId) {
+  const id = encodeURIComponent(String(authId).trim())
+  return request(`/api/auth/${id}/refresh`, { method: 'PUT' })
+}
+
+/**
+ * 全量刷新所有过期授权状态（仅管理员）
+ * PUT /api/auth/refresh/all
+ * @returns {Promise<{ updatedCount?: number }>}
+ */
+export function refreshAllExpiredAuth() {
+  return request('/api/auth/refresh/all', { method: 'PUT' })
 }

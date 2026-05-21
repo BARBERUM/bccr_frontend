@@ -1,0 +1,258 @@
+/**
+ * 作品搜索下拉 + 选中条（授权页「授权作品」/「被授权方」与查重页「待查重作品」共用）
+ * 外层请加 class：bccr-work-pick-combo；授权作品区可加 auth-work-field，被授权方可加 auth-grantee-field，查重可加 recheck-work-pick-host。
+ */
+.bccr-work-pick-combo.auth-grantee-field {
+  position: relative;
+  z-index: 1;
+}
+
+.bccr-work-pick-combo.auth-work-field,
+.bccr-work-pick-combo.recheck-work-pick-host {
+  position: relative;
+  z-index: 12;
+}
+
+.bccr-work-pick-combo .combo-wrap {
+  position: relative;
+  z-index: 2;
+}
+
+.bccr-work-pick-combo .combo-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.bccr-work-pick-combo .combo-inp {
+  flex: 1;
+  min-width: 0;
+}
+
+.bccr-work-pick-combo .combo-loading {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  color: rgba(251, 191, 36, 0.88);
+  pointer-events: none;
+}
+
+.bccr-work-pick-combo .combo-loading-spin {
+  display: inline-block;
+  font-size: 1.1rem;
+  line-height: 1;
+  animation: bccr-work-pick-combo-spin 0.85s linear infinite;
+}
+
+@keyframes bccr-work-pick-combo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.bccr-work-pick-combo .suggest-dd {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 5;
+  margin: 0;
+  padding: 0.35rem;
+  list-style: none;
+  max-height: min(18rem, 52vh);
+  overflow-y: auto;
+  border-radius: 0.65rem;
+  border: 1px solid rgba(251, 191, 36, 0.22);
+  background: var(--bccr-surface-overlay);
+  box-shadow:
+    0 0 0 1px var(--bccr-hover),
+    0 16px 40px var(--bccr-shadow-md);
+  backdrop-filter: blur(12px);
+}
+
+.bccr-work-pick-combo .suggest-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.6rem;
+  border-radius: 0.45rem;
+  font-size: 0.86rem;
+}
+
+.bccr-work-pick-combo .suggest-row--status {
+  color: var(--bccr-muted);
+  justify-content: center;
+  font-size: 0.82rem;
+}
+
+.bccr-work-pick-combo .suggest-row--pick {
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    box-shadow 0.12s;
+}
+
+.bccr-work-pick-combo .suggest-row--pick:hover {
+  background: rgba(245, 158, 11, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.15);
+}
+
+.bccr-work-pick-combo .suggest-av {
+  flex-shrink: 0;
+  width: 2.35rem;
+  height: 2.35rem;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  background: var(--bccr-surface-muted);
+}
+
+.bccr-work-pick-combo .suggest-av-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.bccr-work-pick-combo .suggest-av-ph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 0.95rem;
+  font-weight: 750;
+  color: #b45309;
+}
+
+.bccr-work-pick-combo .suggest-txt {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+
+.bccr-work-pick-combo .suggest-nick {
+  font-weight: 650;
+  color: var(--bccr-text);
+}
+
+.bccr-work-pick-combo .suggest-un {
+  font-size: 0.76rem;
+  color: var(--bccr-muted);
+  word-break: break-all;
+}
+
+.bccr-work-pick-combo .suggest-type {
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--bccr-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bccr-work-pick-combo .selected-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(52, 211, 153, 0.28);
+  background: linear-gradient(120deg, rgba(16, 185, 129, 0.1), var(--bccr-card));
+}
+
+.bccr-work-pick-combo .selected-strip--work {
+  border-color: rgba(251, 191, 36, 0.32);
+  background: linear-gradient(120deg, rgba(245, 158, 11, 0.12), var(--bccr-card));
+}
+
+.bccr-work-pick-combo .selected-strip--work .selected-nick {
+  color: var(--bccr-warning-text);
+}
+
+.bccr-work-pick-combo .selected-strip--work .selected-un {
+  color: var(--bccr-muted);
+}
+
+.bccr-work-pick-combo .selected-av {
+  flex-shrink: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid rgba(52, 211, 153, 0.35);
+}
+
+.bccr-work-pick-combo .selected-av-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.bccr-work-pick-combo .selected-av-ph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 1rem;
+  font-weight: 750;
+  color: var(--bccr-success-text);
+  background: var(--bccr-success-soft);
+}
+
+.bccr-work-pick-combo .selected-txt {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+}
+
+.bccr-work-pick-combo .selected-nick {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--bccr-success-text);
+}
+
+.bccr-work-pick-combo .selected-un {
+  font-size: 0.76rem;
+  color: var(--bccr-muted);
+  word-break: break-all;
+}
+
+.bccr-work-pick-combo .selected-meta {
+  font-size: 0.72rem;
+  color: var(--bccr-muted);
+}
+
+.bccr-work-pick-combo .selected-addr {
+  font-size: 0.72rem;
+  color: var(--bccr-muted);
+}
+
+.bccr-work-pick-combo .btn-strip-change {
+  flex-shrink: 0;
+  padding: 0.35rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--bccr-warning-border);
+  background: var(--bccr-warning-soft);
+  color: var(--bccr-warning-text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+}
+
+.bccr-work-pick-combo .btn-strip-change:hover {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(253, 224, 71, 0.5);
+}

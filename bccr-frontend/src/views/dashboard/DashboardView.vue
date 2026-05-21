@@ -183,7 +183,7 @@ function clearForbiddenTip() {
   border-radius: 0.65rem;
   background: linear-gradient(135deg, rgba(248, 113, 113, 0.14), rgba(251, 146, 60, 0.08));
   border: 1px solid rgba(248, 113, 113, 0.38);
-  color: #fecaca;
+  color: var(--bccr-danger);
   font-size: 0.9rem;
 }
 
@@ -226,9 +226,9 @@ function clearForbiddenTip() {
   padding: 1.75rem 1.5rem 1.65rem;
   border-radius: 1rem;
   border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(15, 23, 42, 0.55);
+  background: var(--bccr-panel-bg);
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 24px 60px var(--bccr-shadow-md);
 }
 
 .hero-glow {
@@ -298,9 +298,9 @@ function clearForbiddenTip() {
   font-size: 0.78rem;
   padding: 0.28rem 0.65rem;
   border-radius: 999px;
-  background: rgba(59, 130, 246, 0.18);
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  color: #bfdbfe;
+  background: var(--bccr-accent-soft);
+  border: 1px solid var(--bccr-accent-border);
+  color: var(--bccr-pill-text);
   font-weight: 500;
 }
 
@@ -316,8 +316,8 @@ function clearForbiddenTip() {
   font-size: 0.8rem;
   padding: 0.1rem 0.35rem;
   border-radius: 0.25rem;
-  background: rgba(148, 163, 184, 0.15);
-  color: #cbd5e1;
+  background: var(--bccr-hover);
+  color: var(--bccr-muted);
 }
 
 .section-head {
@@ -351,7 +351,7 @@ function clearForbiddenTip() {
   padding: 1.05rem 1rem 1.05rem 1.05rem;
   border-radius: 0.85rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(15, 23, 42, 0.42);
+  background: var(--bccr-card);
   color: var(--bccr-text);
   text-decoration: none;
   transition:
@@ -377,8 +377,8 @@ function clearForbiddenTip() {
 .tile:hover {
   transform: translateY(-3px);
   border-color: rgba(59, 130, 246, 0.35);
-  background: rgba(30, 41, 59, 0.55);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+  background: var(--bccr-surface-muted);
+  box-shadow: 0 16px 40px var(--bccr-shadow-md);
 }
 
 .tile:active {
@@ -422,7 +422,7 @@ function clearForbiddenTip() {
   align-self: center;
   width: 1.35rem;
   height: 1.35rem;
-  color: rgba(148, 163, 184, 0.55);
+  color: var(--bccr-placeholder);
   transition: color 0.15s, transform 0.18s ease;
 }
 
@@ -444,7 +444,7 @@ function clearForbiddenTip() {
   padding-top: 1.25rem;
   border-top: 1px solid rgba(148, 163, 184, 0.12);
   font-size: 0.78rem;
-  color: rgba(148, 163, 184, 0.65);
+  color: var(--bccr-muted);
 }
 
 .dot {

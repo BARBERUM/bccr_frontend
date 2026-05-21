@@ -42,7 +42,7 @@ defineProps({
   padding: 1.25rem 1.35rem;
   border-radius: 0.75rem;
   border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.45);
+  background: var(--bccr-card);
 }
 
 .muted {

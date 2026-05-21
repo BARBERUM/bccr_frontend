@@ -1,4 +1,5 @@
 import { request, requestMultipart } from './client'
+import { normalizeWorkIdParam } from './work'
 
 /**
  * 手动上传查重（POST /api/work/check，multipart）
@@ -20,7 +21,7 @@ export function manualCheckWork(file, workType) {
  * @param {string} workId
  */
 export function fetchPlagiarismRecordsByWorkId(workId) {
-  const id = encodeURIComponent(String(workId).trim())
+  const id = encodeURIComponent(normalizeWorkIdParam(workId))
   return request(`/api/plagiarism/work/${id}`, { method: 'GET' })
 }
 

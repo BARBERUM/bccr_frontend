@@ -2,18 +2,22 @@
 defineProps({
   title: { type: String, default: '' },
   subtitle: { type: String, default: '' },
+  /** 注册等较宽表单 */
+  wide: { type: Boolean, default: false },
+  /** 压缩顶部品牌区高度（注册页等） */
+  compact: { type: Boolean, default: false },
 })
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{ 'shell--compact': compact }">
     <div class="brand">
       <div class="logo">BCCR</div>
       <h1 class="sys-name">AIGC 作品指纹版权保护系统</h1>
       <p class="sys-desc">联盟链存证 · 指纹查重 · 授权溯源</p>
     </div>
 
-    <div class="panel">
+    <div class="panel" :class="{ 'panel--wide': wide }">
       <header class="panel-head">
         <h2>{{ title }}</h2>
         <p v-if="subtitle" class="sub">{{ subtitle }}</p>
@@ -21,7 +25,7 @@ defineProps({
       <slot />
     </div>
 
-    <footer class="foot">基础 URL：开发环境通过代理访问后端 · JWT 有效期 24 小时</footer>
+    <footer class="foot">请妥善保管账号密码，勿在公共设备上保存登录状态。</footer>
   </div>
 </template>
 
@@ -78,7 +82,50 @@ defineProps({
   background: var(--bccr-card);
   border: 1px solid var(--bccr-border);
   backdrop-filter: blur(12px);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--bccr-shadow-lg);
+}
+
+.panel--wide {
+  max-width: 640px;
+}
+
+.shell--compact {
+  padding-top: 1rem;
+  padding-bottom: 1.25rem;
+  gap: 1rem;
+}
+
+.shell--compact .logo {
+  width: 2.75rem;
+  height: 2.75rem;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
+.shell--compact .sys-name {
+  font-size: 1.1rem;
+}
+
+.shell--compact .sys-desc {
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+}
+
+.shell--compact .panel-head {
+  margin-bottom: 0.85rem;
+}
+
+.shell--compact .panel-head h2 {
+  font-size: 1.12rem;
+}
+
+.shell--compact .panel-head .sub {
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.shell--compact .panel {
+  padding: 1.1rem 1.2rem 1.15rem;
 }
 
 .panel-head {

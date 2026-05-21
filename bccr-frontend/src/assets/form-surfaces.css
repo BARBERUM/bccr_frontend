@@ -1,0 +1,28 @@
+/**
+ * 查重 / 登记 / 授权等表单页共用：页面标题、分区标题
+ */
+.bccr-page-title,
+.check-page .title,
+.register-shell .title,
+.auth-page .title,
+.my-works-page .title.hero-title {
+  background: var(--bccr-title-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.check-page .h2,
+.register-shell .h2,
+.auth-page .h2,
+.card-grant .h2 {
+  color: var(--bccr-section-title);
+}
+
+/* 作品类型、文件上传等选择区共用底面 */
+.bccr-choice-surface {
+  padding: 0.7rem 0.8rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--bccr-choice-surface-border);
+  background: var(--bccr-choice-surface-bg);
+}

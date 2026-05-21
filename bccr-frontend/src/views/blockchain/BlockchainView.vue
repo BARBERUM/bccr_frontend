@@ -3,8 +3,15 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import * as chainApi from '@/api/blockchain'
 import { fetchAdminWorkOverview, fetchWorkList, normalizeListPage } from '@/api/work'
+import DistPieChart from '@/components/charts/DistPieChart.vue'
 import {
-  flattenStatusRows,
+  extractContractHighlights,
+  extractNodeGroups,
+  extractNodeHighlights,
+  extractNodeQuickStats,
+  humanizeWorkStatusKey,
+  humanizeWorkTypeKey,
+  isCopyableValue,
   pickBool,
   pickStr,
   shortHex,
@@ -25,6 +32,30 @@ const workOverviewErr = ref('')
 const workListTotal = ref(0)
 const workListTotalOk = ref(false)
 
+/** @type {import('vue').Ref<'works' | 'node' | 'contract'>} */
+const activeTab = ref('works')
+
+const TABS = [
+  {
+    id: /** @type {'works'} */ ('works'),
+    name: '作品总览',
+    note: '登记总量、上链数量及类型/状态分布',
+    tone: 'emerald',
+  },
+  {
+    id: /** @type {'node'} */ ('node'),
+    name: '节点状态',
+    note: '是否连通及链上同步相关信息',
+    tone: 'cyan',
+  },
+  {
+    id: /** @type {'contract'} */ ('contract'),
+    name: '合约信息',
+    note: '合约是否可用及部署地址等',
+    tone: 'violet',
+  },
+]
+
 const nodeConnected = computed(() => {
   if (!statusPack.value.ok) return false
   const d = /** @type {Record<string, unknown>} */ (statusPack.value.data)
@@ -37,17 +68,64 @@ const contractAvailable = computed(() => {
   return pickBool(d, ['available', 'isAvailable'], false)
 })
 
-const statusRows = computed(() => {
+const nodeHighlights = computed(() => {
   if (!statusPack.value.ok) return []
-  return flattenStatusRows(
+  return extractNodeHighlights(
     /** @type {Record<string, unknown>} */ (statusPack.value.data),
   )
 })
 
-const contractRows = computed(() => {
+const nodeQuickStats = computed(() => {
+  if (!statusPack.value.ok) return []
+  return extractNodeQuickStats(
+    /** @type {Record<string, unknown>} */ (statusPack.value.data),
+  )
+})
+
+const nodeGroups = computed(() => {
+  if (!statusPack.value.ok) return []
+  const groups = extractNodeGroups(
+    /** @type {Record<string, unknown>} */ (statusPack.value.data),
+  )
+  if (!nodeRpcUrl.value) return groups
+  return groups
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((it) => it.key !== 'rpc'),
+    }))
+    .filter((g) => g.items.length > 0)
+})
+
+const nodeRpcUrl = computed(() => {
+  if (!statusPack.value.ok) return ''
+  return pickStr(
+    /** @type {Record<string, unknown>} */ (statusPack.value.data),
+    ['nodeUrl', 'rpcUrl', 'channelUrl'],
+  )
+})
+
+const contractHighlights = computed(() => {
   if (!contractPack.value.ok) return []
-  return flattenStatusRows(
+  return extractContractHighlights(
     /** @type {Record<string, unknown>} */ (contractPack.value.data),
+  )
+})
+
+const nodeErrorMessage = computed(() => {
+  if (!statusPack.value.ok) return statusPack.value.message
+  if (nodeConnected.value) return ''
+  return pickStr(
+    /** @type {Record<string, unknown>} */ (statusPack.value.data),
+    ['errorMessage', 'error', 'message'],
+  )
+})
+
+const contractErrorMessage = computed(() => {
+  if (!contractPack.value.ok) return contractPack.value.message
+  if (contractAvailable.value) return ''
+  return pickStr(
+    /** @type {Record<string, unknown>} */ (contractPack.value.data),
+    ['errorMessage', 'error', 'message'],
   )
 })
 
@@ -118,7 +196,66 @@ const byTypeEntries = computed(() => {
   )
 })
 
-/** 作品总览是否来自接口成功体（区别于仅列表兜底） */
+/** @param {[string, unknown][]} entries */
+function distWithPercent(entries) {
+  const nums = entries.map(([, v]) => Number(v)).filter((n) => Number.isFinite(n))
+  const max = nums.length ? Math.max(...nums) : 1
+  return entries.map(([k, v]) => {
+    const n = Number(v)
+    const count = Number.isFinite(n) ? n : 0
+    return {
+      key: k,
+      count,
+      pct: max > 0 ? Math.round((count / max) * 100) : 0,
+    }
+  })
+}
+
+const statusDist = computed(() =>
+  distWithPercent(byStatusEntries.value).map((row) => ({
+    ...row,
+    label: humanizeWorkStatusKey(row.key),
+  })),
+)
+
+const typeDist = computed(() =>
+  distWithPercent(byTypeEntries.value).map((row) => ({
+    ...row,
+    label: humanizeWorkTypeKey(row.key),
+  })),
+)
+
+const onChainRate = computed(() => {
+  const total = totalWorksDisplay.value
+  const onChain = onChainWorksDisplay.value
+  if (total == null || onChain == null || total <= 0) return null
+  return Math.round((onChain / total) * 100)
+})
+
+const chainPieSlices = computed(() => {
+  const total = totalWorksDisplay.value
+  const onChain = onChainWorksDisplay.value
+  if (total == null || onChain == null || total <= 0) return []
+  const offChain = Math.max(0, total - onChain)
+  /** @type {{ key: string, label: string, count: number, color: string }[]} */
+  const slices = [
+    { key: 'on-chain', label: '已上链', count: onChain, color: '#34d399' },
+  ]
+  if (offChain > 0) {
+    slices.push({ key: 'off-chain', label: '未上链', count: offChain, color: '#475569' })
+  }
+  return slices
+})
+
+const hasPieCharts = computed(
+  () => chainPieSlices.value.length > 0 || statusDist.value.length > 0 || typeDist.value.length > 0,
+)
+
+/** @param {'works' | 'node' | 'contract'} id */
+function selectTab(id) {
+  activeTab.value = id
+}
+
 const overviewBodyOk = computed(
   () => workOverview.value != null && typeof workOverview.value === 'object',
 )
@@ -127,10 +264,10 @@ const totalDataSourceHint = computed(() => {
   if (overviewBodyOk.value) {
     const ov = /** @type {Record<string, unknown>} */ (workOverview.value)
     if (['totalWorks', 'total', 'count'].some((k) => ov[k] != null)) {
-      return '来自 overview'
+      return '来自作品总览'
     }
   }
-  if (workListTotalOk.value) return '列表分页兜底'
+  if (workListTotalOk.value) return '来自作品列表统计'
   return ''
 })
 
@@ -169,7 +306,7 @@ async function loadDashboard() {
       workOverviewErr.value =
         err instanceof Error
           ? err.message
-          : '作品总览 GET /api/work/admin/overview 请求失败，将尝试用作品列表分页 total 估算规模。'
+          : '作品总览暂时不可用，已尝试用作品列表数量估算规模。'
     }
   }
 
@@ -231,27 +368,46 @@ onBeforeUnmount(() => {
           <p class="eyebrow">管理员 · 只读巡检</p>
           <h1 class="title">区块链控制台</h1>
           <p class="lead">
-            先快速把握<strong>链路健康</strong>，再对照<strong>作品总览接口</strong>理解业务体量与分布信息结构清晰，关键接口与用途在下方逐项对应。
+            通过下方三个分区切换查看<strong>作品登记概况</strong>、<strong>节点连通与同步</strong>、<strong>智能合约部署</strong>。数据为只读巡检，可随时刷新。
           </p>
 
-          <div class="iface-rail-wrap">
-            <ul class="iface-rail" aria-label="本页数据接口">
-              <li class="iface-card iface-card-emerald">
-                <span class="iface-endpoint mono">GET /api/work/admin/overview</span>
-                <span class="iface-name">作品总览数据</span>
-                <span class="iface-note">体量、分布、可按状态/类型聚合</span>
-              </li>
-              <li class="iface-card iface-card-cyan">
-                <span class="iface-endpoint mono">GET /api/blockchain/status</span>
-                <span class="iface-name">节点连接状态</span>
-                <span class="iface-note">RPC / 块高 / 同步等明细</span>
-              </li>
-              <li class="iface-card iface-card-violet">
-                <span class="iface-endpoint mono">GET /api/blockchain/contract</span>
-                <span class="iface-name">合约状态信息</span>
-                <span class="iface-note">合约可用性与地址字段</span>
-              </li>
-            </ul>
+          <div class="tab-rail-wrap">
+            <div class="tab-rail" role="tablist" aria-label="控制台分区">
+              <button
+                v-for="tab in TABS"
+                :key="tab.id"
+                type="button"
+                role="tab"
+                class="tab-btn"
+                :class="[`tab-btn-${tab.tone}`, { active: activeTab === tab.id }]"
+                :aria-selected="activeTab === tab.id"
+                @click="selectTab(tab.id)"
+              >
+                <span class="tab-btn-head">
+                  <span class="tab-indicator" aria-hidden="true" />
+                  <span class="tab-name">{{ tab.name }}</span>
+                  <span
+                    v-if="tab.id === 'node'"
+                    class="tab-live"
+                    :class="{
+                      ok: statusPack.ok && nodeConnected,
+                      bad: statusPack.ok && !nodeConnected,
+                    }"
+                    aria-hidden="true"
+                  />
+                  <span
+                    v-else-if="tab.id === 'contract'"
+                    class="tab-live violet"
+                    :class="{
+                      ok: contractPack.ok && contractAvailable,
+                      bad: contractPack.ok && !contractAvailable,
+                    }"
+                    aria-hidden="true"
+                  />
+                </span>
+                <span class="tab-note">{{ tab.note }}</span>
+              </button>
+            </div>
           </div>
 
           <div class="hero-actions">
@@ -264,210 +420,262 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
-      <!-- 01 链路与合约 -->
-      <section class="bc-section" aria-labelledby="sec-chain">
-        <div class="sec-head">
-          <span class="sec-badge" aria-hidden="true">01</span>
-          <div class="sec-titles">
-            <h2 id="sec-chain" class="sec-title">链路与合约</h2>
-            <p class="sec-sub">
-              对应
-              <code class="mono sm">/api/blockchain/status</code>
-              与
-              <code class="mono sm">/api/blockchain/contract</code>
-              ：用于确认节点是否可达及合约配置是否就绪。
-            </p>
-          </div>
-        </div>
-
-        <section class="stat-strip" aria-label="健康摘要">
-          <article class="stat-tile" :class="{ ok: nodeConnected, bad: statusPack.ok && !nodeConnected, idle: !statusPack.ok }">
-            <div class="stat-glyph" aria-hidden="true">
-              <span class="glyph-ring" />
-              <span class="stat-dot" :class="{ pulse: nodeConnected && statusPack.ok }" />
-            </div>
-            <div class="stat-body">
-              <span class="stat-k">节点连接</span>
-              <span class="stat-v">{{ statusPack.ok ? (nodeConnected ? '已连接' : '未连接') : '加载中/未知' }}</span>
-            </div>
-          </article>
-          <article
-            class="stat-tile"
-            :class="{ ok: contractAvailable, bad: contractPack.ok && !contractAvailable, idle: !contractPack.ok }"
-          >
-            <div class="stat-glyph violet" aria-hidden="true">
-              <span class="glyph-ring" />
-              <span class="stat-dot" />
-            </div>
-            <div class="stat-body">
-              <span class="stat-k">智能合约</span>
-              <span class="stat-v">{{ contractPack.ok ? (contractAvailable ? '可用' : '不可用') : '加载中/未知' }}</span>
-            </div>
-          </article>
-        </section>
-
-        <div class="card-grid">
-          <article class="card card-node">
-            <div class="card-topline" aria-hidden="true" />
-            <header class="card-head">
+      <section class="panel-shell" aria-live="polite">
+        <Transition name="panel-fade" mode="out-in">
+          <div v-if="activeTab === 'works'" key="works" class="panel panel-works" role="tabpanel">
+            <header class="panel-head">
               <div>
-                <p class="card-kicker mono">GET /api/blockchain/status</p>
-                <h3 class="card-title">节点连接状态</h3>
+                <h2 class="panel-title">作品总览</h2>
+                <p class="panel-sub">登记规模、上链进度与类型/状态分布</p>
+              </div>
+              <RouterLink :to="{ name: 'works-square' }" class="panel-link">前往作品广场 →</RouterLink>
+            </header>
+
+            <div class="ov-board">
+              <div class="ov-metrics">
+                <article class="ov-metric ov-metric-main">
+                  <span class="ov-metric-label">登记作品总数</span>
+                  <strong class="ov-metric-val">{{ totalWorksDisplay != null ? totalWorksDisplay : '—' }}</strong>
+                  <span v-if="totalDataSourceHint" class="ov-metric-meta">{{ totalDataSourceHint }}</span>
+                </article>
+                <article class="ov-metric">
+                  <span class="ov-metric-label">链上作品数量</span>
+                  <strong class="ov-metric-val accent">{{ onChainWorksDisplay != null ? onChainWorksDisplay : '—' }}</strong>
+                  <span v-if="onChainRate != null" class="ov-metric-meta">上链率约 {{ onChainRate }}%</span>
+                  <span v-else class="ov-metric-meta">来自总览数据</span>
+                </article>
+                <article class="ov-metric">
+                  <span class="ov-metric-label">待审核</span>
+                  <strong class="ov-metric-val warn">{{ pendingAuditDisplay != null ? pendingAuditDisplay : '—' }}</strong>
+                  <span class="ov-metric-meta">审核队列规模</span>
+                </article>
+              </div>
+
+              <div v-if="onChainRate != null" class="rate-bar-wrap">
+                <div class="rate-bar-head">
+                  <span>上链进度</span>
+                  <strong>{{ onChainRate }}%</strong>
+                </div>
+                <div class="rate-bar-track" aria-hidden="true">
+                  <span class="rate-bar-fill" :style="{ width: `${onChainRate}%` }" />
+                </div>
+              </div>
+
+              <p v-if="workOverviewErr" class="banner-soft">{{ workOverviewErr }}</p>
+
+              <div v-if="hasPieCharts" class="pie-grid">
+                <DistPieChart
+                  v-if="chainPieSlices.length"
+                  title="上链情况"
+                  :slices="chainPieSlices"
+                  tone="emerald"
+                />
+                <DistPieChart
+                  v-if="statusDist.length"
+                  title="审核 / 状态分布"
+                  :slices="statusDist"
+                  tone="emerald"
+                />
+                <DistPieChart
+                  v-if="typeDist.length"
+                  title="作品类型分布"
+                  :slices="typeDist"
+                  tone="cyan"
+                />
+              </div>
+
+              <p
+                v-if="overviewBodyOk && !hasPieCharts"
+                class="muted soft-tip"
+              >
+                总览已加载；若暂无状态或类型分布，上方核心指标仍可参考。
+              </p>
+              <p v-else-if="!overviewBodyOk && !workOverviewErr" class="muted soft-tip">
+                正在加载作品统计数据…
+              </p>
+            </div>
+          </div>
+
+          <div v-else-if="activeTab === 'node'" key="node" class="panel panel-node" role="tabpanel">
+            <header class="panel-head">
+              <div>
+                <h2 class="panel-title">节点状态</h2>
+                <p class="panel-sub">区块链节点连通性与链上同步信息</p>
               </div>
               <span class="pill" :class="statusPack.ok && nodeConnected ? 'pill-ok' : 'pill-bad'">{{ statusPillText }}</span>
             </header>
-            <div class="card-body">
-              <p v-if="!statusPack.ok" class="card-err">{{ statusPack.message }}</p>
-              <template v-else>
-                <aside
-                  v-if="!nodeConnected && pickStr(statusPack.data, ['errorMessage', 'error', 'message'])"
-                  class="callout callout-warn"
-                >
-                  <span class="callout-tag">诊断</span>
-                  <p class="callout-txt">{{ pickStr(statusPack.data, ['errorMessage', 'error', 'message']) }}</p>
-                </aside>
-                <template v-if="statusRows.length">
-                  <p class="kv-intro">以下为接口返回的业务字段（已转为中文标签，便于浏览）：</p>
-                  <div class="kv-table">
-                    <div v-for="row in statusRows" :key="row.key" class="kv-row">
-                      <span class="kv-label" :title="row.key">{{ row.label }}</span>
-                      <code class="kv-value mono">{{ row.value }}</code>
-                    </div>
-                  </div>
-                </template>
-                <p v-else class="muted box-muted">暂无除连接状态外的标量字段。可在 <code class="mono">BlockChainStatus</code> 中补充块高、链 ID、RPC URL 等。</p>
-              </template>
-            </div>
-          </article>
 
-          <article class="card card-contract">
-            <div class="card-topline contract-line" aria-hidden="true" />
-            <header class="card-head">
+            <article
+              class="status-hero"
+              :class="{
+                ok: statusPack.ok && nodeConnected,
+                bad: statusPack.ok && !nodeConnected,
+                idle: !statusPack.ok,
+              }"
+            >
+              <div class="status-hero-glyph" aria-hidden="true">
+                <span class="glyph-ring lg" />
+                <span class="stat-dot lg" :class="{ pulse: nodeConnected && statusPack.ok }" />
+              </div>
+              <div class="status-hero-body">
+                <span class="status-hero-k">连接状态</span>
+                <strong class="status-hero-v">
+                  {{ statusPack.ok ? (nodeConnected ? '节点已连接' : '节点未连接') : '状态未知' }}
+                </strong>
+                <p class="status-hero-hint">
+                  {{
+                    statusPack.ok
+                      ? nodeConnected
+                        ? 'RPC 可达，可继续查看区块高度与同步情况。'
+                        : '无法与链节点建立连接，请检查 RPC 配置或网络。'
+                      : '尚未获取节点状态，可点击上方刷新。'
+                  }}
+                </p>
+              </div>
+            </article>
+
+            <aside v-if="nodeErrorMessage" class="callout callout-warn">
+              <span class="callout-tag">诊断</span>
+              <p class="callout-txt">{{ nodeErrorMessage }}</p>
+            </aside>
+
+            <section v-if="nodeQuickStats.length" class="node-quick-strip" aria-label="节点关键指标">
+              <article v-for="item in nodeQuickStats" :key="item.key" class="node-quick-tile">
+                <span class="node-quick-icon" aria-hidden="true">{{ item.icon }}</span>
+                <div class="node-quick-body">
+                  <span class="node-quick-k">{{ item.label }}</span>
+                  <strong class="node-quick-v mono" :title="item.rawValue ?? item.value">{{ item.value }}</strong>
+                </div>
+              </article>
+            </section>
+
+            <div v-if="nodeRpcUrl && statusPack.ok && nodeConnected" class="node-rpc-panel">
+              <div class="node-rpc-head">
+                <span class="node-rpc-title">节点接入地址</span>
+                <button type="button" class="btn-mini cyan" @click="copyText('节点地址', nodeRpcUrl)">复制</button>
+              </div>
+              <p class="node-rpc-val mono">{{ nodeRpcUrl }}</p>
+            </div>
+
+            <div v-if="nodeGroups.length" class="node-group-list">
+              <section v-for="group in nodeGroups" :key="group.id" class="node-group">
+                <header class="node-group-head">
+                  <h3 class="node-group-title">{{ group.title }}</h3>
+                  <p class="node-group-desc">{{ group.desc }}</p>
+                </header>
+                <div class="metric-grid node-metric-grid">
+                  <article v-for="item in group.items" :key="`${group.id}-${item.key}`" class="metric-card node-metric">
+                    <span class="metric-icon" aria-hidden="true">{{ item.icon }}</span>
+                    <div class="metric-body">
+                      <span class="metric-label">{{ item.label }}</span>
+                      <div class="metric-value-row">
+                        <code class="metric-value mono" :title="item.rawValue ?? item.value">{{ item.value }}</code>
+                        <button
+                          v-if="isCopyableValue(item.rawValue ?? item.value)"
+                          type="button"
+                          class="btn-copy-inline"
+                          @click="copyText(item.label, item.rawValue ?? item.value)"
+                        >
+                          复制
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </section>
+            </div>
+
+            <div v-else-if="nodeHighlights.length" class="metric-grid">
+              <article v-for="item in nodeHighlights" :key="item.key" class="metric-card">
+                <span class="metric-icon" aria-hidden="true">{{ item.icon }}</span>
+                <div class="metric-body">
+                  <span class="metric-label">{{ item.label }}</span>
+                  <code class="metric-value mono" :title="item.rawValue ?? item.value">{{ item.value }}</code>
+                </div>
+              </article>
+            </div>
+            <p v-else-if="statusPack.ok && nodeConnected" class="muted box-muted">
+              节点已连接，但暂未返回块高、链 ID 等扩展字段。
+            </p>
+            <p v-else-if="!statusPack.ok" class="card-err">{{ statusPack.message }}</p>
+          </div>
+
+          <div v-else key="contract" class="panel panel-contract" role="tabpanel">
+            <header class="panel-head">
               <div>
-                <p class="card-kicker mono">GET /api/blockchain/contract</p>
-                <h3 class="card-title">合约状态信息</h3>
+                <h2 class="panel-title">合约信息</h2>
+                <p class="panel-sub">智能合约可用性与链上部署详情</p>
               </div>
               <span class="pill" :class="contractPack.ok && contractAvailable ? 'pill-ok' : 'pill-bad'">{{ contractPillText }}</span>
             </header>
-            <div class="card-body">
-              <p v-if="!contractPack.ok" class="card-err">{{ contractPack.message }}</p>
-              <template v-else>
-                <aside
-                  v-if="!contractAvailable && pickStr(contractPack.data, ['errorMessage', 'error', 'message'])"
-                  class="callout callout-warn"
-                >
-                  <span class="callout-tag">诊断</span>
-                  <p class="callout-txt">{{ pickStr(contractPack.data, ['errorMessage', 'error', 'message']) }}</p>
-                </aside>
-                <div v-if="contractAddress" class="addr-panel">
-                  <div class="addr-head">
-                    <span class="addr-title">合约地址</span>
-                    <button type="button" class="btn-mini" @click="copyText('合约地址', contractAddress)">复制完整地址</button>
-                  </div>
-                  <p class="addr-full mono">{{ contractAddress }}</p>
-                  <p class="addr-hint mono">缩略：<span>{{ shortHex(contractAddress, 10, 8) }}</span></p>
-                </div>
-                <template v-if="contractRows.length">
-                  <p class="kv-intro">其他合约相关字段：</p>
-                  <div class="kv-table">
-                    <div v-for="row in contractRows" :key="row.key" class="kv-row">
-                      <span class="kv-label" :title="row.key">{{ row.label }}</span>
-                      <code class="kv-value mono">{{ row.value }}</code>
-                    </div>
-                  </div>
-                </template>
-                <p v-else-if="!contractAddress" class="muted box-muted">
-                  未返回合约地址或其他标量字段。可在 <code class="mono">ContractInfo</code> 中返回网络名、版本等。
+
+            <article
+              class="status-hero violet"
+              :class="{
+                ok: contractPack.ok && contractAvailable,
+                bad: contractPack.ok && !contractAvailable,
+                idle: !contractPack.ok,
+              }"
+            >
+              <div class="status-hero-glyph violet" aria-hidden="true">
+                <span class="glyph-ring lg" />
+                <span class="stat-dot lg" />
+              </div>
+              <div class="status-hero-body">
+                <span class="status-hero-k">合约状态</span>
+                <strong class="status-hero-v">
+                  {{ contractPack.ok ? (contractAvailable ? '合约可用' : '合约不可用') : '状态未知' }}
+                </strong>
+                <p class="status-hero-hint">
+                  {{
+                    contractPack.ok
+                      ? contractAvailable
+                        ? '链上合约已就绪，可进行作品确权相关操作。'
+                        : '合约未部署或调用失败，请检查部署配置。'
+                      : '尚未获取合约信息，可点击上方刷新。'
+                  }}
                 </p>
-              </template>
-            </div>
-          </article>
-        </div>
-      </section>
+              </div>
+            </article>
 
-      <!-- 02 作品 -->
-      <section class="bc-section bc-section-works" aria-labelledby="sec-works">
-        <div class="sec-head">
-          <span class="sec-badge emerald" aria-hidden="true">02</span>
-          <div class="sec-titles">
-            <h2 id="sec-works" class="sec-title">作品总览</h2>
-            <p class="sec-sub">
-              对应
-              <code class="mono sm">GET /api/work/admin/overview</code>
-              ：与链解耦的业务视角；若无总数字段，再用
-              <code class="mono sm">GET /api/work/list</code>
-              的 total 兜底。
+            <aside v-if="contractErrorMessage" class="callout callout-warn">
+              <span class="callout-tag">诊断</span>
+              <p class="callout-txt">{{ contractErrorMessage }}</p>
+            </aside>
+
+            <div v-if="contractAddress" class="addr-panel">
+              <div class="addr-head">
+                <span class="addr-title">链上合约地址</span>
+                <button type="button" class="btn-mini" @click="copyText('合约地址', contractAddress)">复制地址</button>
+              </div>
+              <p class="addr-full mono">{{ contractAddress }}</p>
+              <p class="addr-hint mono">缩略显示：{{ shortHex(contractAddress, 10, 8) }}</p>
+            </div>
+
+            <div v-if="contractHighlights.length" class="metric-grid contract-grid">
+              <article v-for="item in contractHighlights" :key="item.key" class="metric-card contract-metric">
+                <div class="metric-body">
+                  <span class="metric-label">{{ item.label }}</span>
+                  <div class="metric-value-row">
+                    <code class="metric-value mono" :title="item.rawValue ?? item.value">{{ item.value }}</code>
+                    <button
+                      v-if="item.copyable"
+                      type="button"
+                      class="btn-copy-inline"
+                      @click="copyText(item.label, item.rawValue ?? item.value)"
+                    >
+                      复制
+                    </button>
+                  </div>
+                </div>
+              </article>
+            </div>
+            <p v-else-if="contractPack.ok && contractAvailable && !contractAddress" class="muted box-muted">
+              合约可用，但未返回地址或其他元数据。
             </p>
+            <p v-else-if="!contractPack.ok" class="card-err">{{ contractPack.message }}</p>
           </div>
-        </div>
-
-        <div class="ov-board">
-          <div class="ov-metrics">
-            <div class="ov-metric">
-              <span class="ov-metric-label">登记作品总数</span>
-              <strong class="ov-metric-val">{{ totalWorksDisplay != null ? totalWorksDisplay : '—' }}</strong>
-              <span v-if="totalDataSourceHint" class="ov-metric-meta">{{ totalDataSourceHint }}</span>
-            </div>
-            <div class="ov-metric">
-              <span class="ov-metric-label">链上作品数量</span>
-              <strong class="ov-metric-val accent">{{ onChainWorksDisplay != null ? onChainWorksDisplay : '—' }}</strong>
-              <span class="ov-metric-meta">overview 字段 onChainCount 等</span>
-            </div>
-            <div class="ov-metric">
-              <span class="ov-metric-label">待审核（若有）</span>
-              <strong class="ov-metric-val warn">{{ pendingAuditDisplay != null ? pendingAuditDisplay : '—' }}</strong>
-              <span class="ov-metric-meta">pendingAuditCount 等</span>
-            </div>
-          </div>
-
-          <p v-if="workOverviewErr" class="banner-soft">{{ workOverviewErr }}</p>
-
-          <div v-if="byStatusEntries.length || byTypeEntries.length" class="dist-grid">
-            <div v-if="byStatusEntries.length" class="dist-block">
-              <h4 class="dist-h">按审核 / 状态分布</h4>
-              <p class="dist-desc">后端 <code class="mono">byStatus</code> 映射</p>
-              <div class="chip-row">
-                <span v-for="entry in byStatusEntries" :key="entry[0]" class="chip">
-                  <span class="chip-k">{{ entry[0] }}</span>
-                  <span class="chip-v">{{ entry[1] }}</span>
-                </span>
-              </div>
-            </div>
-            <div v-if="byTypeEntries.length" class="dist-block">
-              <h4 class="dist-h">按作品类型分布</h4>
-              <p class="dist-desc">后端 <code class="mono">byType</code> 等</p>
-              <div class="chip-row">
-                <span v-for="entry in byTypeEntries" :key="entry[0]" class="chip chip-type">
-                  <span class="chip-k">{{ entry[0] }}</span>
-                  <span class="chip-v">{{ entry[1] }}</span>
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <p
-            v-if="overviewBodyOk && !byStatusEntries.length && !byTypeEntries.length"
-            class="muted soft-tip"
-          >
-            总览已成功拉取；若暂未返回聚合分布字段，可在后端 VO 中补充
-            <code class="mono">byStatus</code>、
-            <code class="mono">byType</code>
-            ，便于本节展示条状分布观感。
-          </p>
-
-          <details class="api-foot">
-            <summary>开发者：总览 VO 字段参考</summary>
-            <div class="api-inner">
-              <p class="mono api-line">GET /api/work/admin/overview</p>
-              <ul class="api-ul">
-                <li><code class="mono">totalWorks</code> · 总数</li>
-                <li><code class="mono">onChainCount</code> · 已上链</li>
-                <li><code class="mono">pendingAuditCount</code> · 待审</li>
-                <li><code class="mono">byStatus</code> / <code class="mono">byType</code> · 分布</li>
-              </ul>
-            </div>
-          </details>
-        </div>
+        </Transition>
       </section>
     </div>
   </div>
@@ -496,10 +704,10 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   font-size: 0.84rem;
   font-weight: 600;
-  color: #ecfdf5;
-  background: rgba(15, 23, 42, 0.92);
+  color: var(--bccr-text);
+  background: var(--bccr-nav-bg);
   border: 1px solid rgba(52, 211, 153, 0.35);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 12px 40px var(--bccr-shadow-md);
 }
 
 .bc-shell {
@@ -558,7 +766,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   border-radius: 1.15rem;
   border: 1px solid rgba(56, 189, 248, 0.12);
-  background: rgba(15, 23, 42, 0.35);
+  background: var(--bccr-surface-muted);
 }
 
 .hero-inner {
@@ -600,7 +808,7 @@ onBeforeUnmount(() => {
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(165, 243, 252, 0.75);
+  color: var(--bccr-accent-text);
 }
 
 .title {
@@ -608,7 +816,7 @@ onBeforeUnmount(() => {
   font-size: 1.68rem;
   font-weight: 780;
   letter-spacing: -0.03em;
-  background: linear-gradient(118deg, #ecfeff 0%, #22d3ee 34%, #a78bfa 68%, #e2e8f0 100%);
+  background: linear-gradient(118deg, #1d4ed8 0%, #0891b2 38%, #6d28d9 72%, #334155 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -623,67 +831,141 @@ onBeforeUnmount(() => {
 }
 
 .lead strong {
-  color: #e2e8f0;
+  color: var(--bccr-text-strong);
   font-weight: 650;
 }
 
-.iface-rail-wrap {
+.iface-rail-wrap,
+.tab-rail-wrap {
   margin-bottom: 1.05rem;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   padding-bottom: 0.25rem;
 }
 
-.iface-rail {
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.tab-rail {
   display: flex;
   gap: 0.65rem;
   min-width: min-content;
 }
 
-.iface-card {
+.tab-btn {
   flex: 1 1 220px;
   min-width: 200px;
   padding: 0.82rem 0.92rem;
   border-radius: 0.82rem;
   border: 1px solid rgba(148, 163, 184, 0.16);
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--bccr-hover);
   display: flex;
   flex-direction: column;
-  gap: 0.32rem;
+  gap: 0.35rem;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.15s ease;
 }
 
-.iface-card-emerald {
+.tab-btn:hover {
+  transform: translateY(-1px);
+}
+
+.tab-btn-emerald {
   border-color: rgba(52, 211, 153, 0.22);
-  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.04);
 }
 
-.iface-card-cyan {
+.tab-btn-cyan {
   border-color: rgba(34, 211, 238, 0.25);
 }
 
-.iface-card-violet {
+.tab-btn-violet {
   border-color: rgba(167, 139, 250, 0.28);
 }
 
-.iface-endpoint {
-  font-size: 0.65rem;
-  line-height: 1.35;
-  color: rgba(186, 230, 253, 0.78);
+.tab-btn.active {
+  background: var(--bccr-card);
+  box-shadow: 0 10px 28px var(--bccr-code-bg);
 }
 
-.iface-name {
+.tab-btn-emerald.active {
+  border-color: rgba(52, 211, 153, 0.55);
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.12), 0 12px 30px rgba(16, 185, 129, 0.08);
+}
+
+.tab-btn-cyan.active {
+  border-color: rgba(34, 211, 238, 0.55);
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.1), 0 12px 30px rgba(34, 211, 238, 0.08);
+}
+
+.tab-btn-violet.active {
+  border-color: rgba(167, 139, 250, 0.55);
+  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.1), 0 12px 30px rgba(91, 33, 182, 0.1);
+}
+
+.tab-btn-head {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
+.tab-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.45);
+  flex-shrink: 0;
+}
+
+.tab-btn-emerald.active .tab-indicator {
+  background: #4ade80;
+  box-shadow: 0 0 10px rgba(74, 222, 128, 0.45);
+}
+
+.tab-btn-cyan.active .tab-indicator {
+  background: #22d3ee;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.45);
+}
+
+.tab-btn-violet.active .tab-indicator {
+  background: #a78bfa;
+  box-shadow: 0 0 10px rgba(167, 139, 250, 0.45);
+}
+
+.tab-name {
   font-size: 0.88rem;
   font-weight: 720;
-  color: #f8fafc;
+  color: var(--bccr-text);
 }
 
-.iface-note {
+.tab-note {
   font-size: 0.72rem;
   line-height: 1.4;
   color: var(--bccr-muted);
+}
+
+.tab-live {
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.45);
+  flex-shrink: 0;
+}
+
+.tab-live.ok {
+  background: #4ade80;
+  box-shadow: 0 0 10px rgba(74, 222, 128, 0.4);
+}
+
+.tab-live.bad {
+  background: #f87171;
+}
+
+.tab-live.violet.ok {
+  background: #c4b5fd;
+  box-shadow: 0 0 10px rgba(196, 181, 253, 0.4);
 }
 
 .hero-actions {
@@ -702,10 +984,18 @@ onBeforeUnmount(() => {
   border: none;
   font-weight: 660;
   font-size: 0.88rem;
-  color: #ecfeff;
+  color: var(--bccr-on-accent);
   cursor: pointer;
-  background: linear-gradient(135deg, #0e7490, #5b21b6);
-  box-shadow: 0 10px 26px rgba(91, 33, 182, 0.28);
+  background: var(--bccr-btn-primary-bg);
+  box-shadow: var(--bccr-shadow-sm);
+  transition:
+    background 0.12s,
+    box-shadow 0.12s;
+}
+
+.btn-refresh:hover:not(:disabled) {
+  background: var(--bccr-btn-primary-hover);
+  box-shadow: var(--bccr-shadow-md);
 }
 
 .btn-refresh:disabled {
@@ -715,7 +1005,8 @@ onBeforeUnmount(() => {
 
 .btn-refresh-ic {
   font-size: 1rem;
-  opacity: 0.9;
+  color: var(--bccr-on-accent);
+  opacity: 0.95;
 }
 
 .btn-refresh-ic.spin {
@@ -731,69 +1022,501 @@ onBeforeUnmount(() => {
 .btn-link {
   padding: 0.52rem 0.95rem;
   border-radius: 0.62rem;
-  border: 1px solid rgba(56, 189, 248, 0.32);
+  border: 1px solid var(--bccr-btn-info-border);
   font-weight: 600;
   font-size: 0.86rem;
-  color: #a5f3fc;
+  color: var(--bccr-btn-info-text);
   text-decoration: none;
-  background: rgba(14, 116, 144, 0.12);
+  background: var(--bccr-btn-info-bg);
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    color 0.12s;
 }
 
 .btn-link:hover {
-  border-color: rgba(165, 243, 252, 0.5);
+  border-color: var(--bccr-option-hover-border);
+  background: var(--bccr-btn-info-hover);
+  color: var(--bccr-accent-text);
 }
 
-/* Sections */
-.bc-section {
-  margin-bottom: 1.75rem;
+/* Panel shell */
+.panel-fade-enter-active,
+.panel-fade-leave-active {
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease;
 }
 
-.sec-head {
+.panel-fade-enter-from,
+.panel-fade-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.panel-shell {
+  margin-top: 0.25rem;
+}
+
+.panel {
+  padding: 1.05rem 1.12rem 1.2rem;
+  border-radius: 1.05rem;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: var(--bccr-card);
+  box-shadow: 0 16px 40px var(--bccr-hover);
+}
+
+.panel-works {
+  border-color: rgba(52, 211, 153, 0.16);
+}
+
+.panel-node {
+  border-color: rgba(34, 211, 238, 0.16);
+}
+
+.panel-contract {
+  border-color: rgba(167, 139, 250, 0.18);
+}
+
+.panel-head {
   display: flex;
-  gap: 0.85rem;
   align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
   margin-bottom: 1rem;
-  padding-bottom: 0.65rem;
+  padding-bottom: 0.72rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
 }
 
-.sec-badge {
+.panel-title {
+  margin: 0 0 0.22rem;
+  font-size: 1.12rem;
+  font-weight: 720;
+  color: var(--bccr-text);
+}
+
+.panel-sub {
+  margin: 0;
+  font-size: 0.81rem;
+  line-height: 1.55;
+  color: var(--bccr-muted);
+}
+
+.panel-link {
   flex-shrink: 0;
-  width: 2.35rem;
-  height: 2.35rem;
+  font-size: 0.8rem;
+  font-weight: 650;
+  color: var(--bccr-success-text);
+  text-decoration: none;
+  padding: 0.35rem 0.62rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(22, 163, 74, 0.32);
+  background: var(--bccr-success-soft);
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+}
+
+.panel-link:hover {
+  border-color: rgba(22, 163, 74, 0.45);
+  background: rgba(22, 163, 74, 0.14);
+  color: #15803d;
+}
+
+.status-hero {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.05rem;
+  margin-bottom: 0.95rem;
+  border-radius: 0.92rem;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: var(--bccr-media-bg);
+}
+
+.status-hero.ok {
+  border-color: rgba(52, 211, 153, 0.28);
+  background: linear-gradient(125deg, rgba(16, 185, 129, 0.1), var(--bccr-panel-bg));
+}
+
+.status-hero.bad {
+  border-color: rgba(251, 113, 133, 0.28);
+  background: linear-gradient(125deg, rgba(251, 113, 133, 0.08), var(--bccr-card));
+}
+
+.status-hero.idle {
+  border-style: dashed;
+}
+
+.status-hero.violet.ok {
+  border-color: rgba(167, 139, 250, 0.32);
+  background: linear-gradient(125deg, rgba(91, 33, 182, 0.14), var(--bccr-panel-bg));
+}
+
+.status-hero-glyph {
+  position: relative;
+  width: 3rem;
+  height: 3rem;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 0.65rem;
-  font-weight: 800;
-  font-size: 0.92rem;
-  color: #cffafe;
-  background: linear-gradient(145deg, rgba(34, 211, 238, 0.2), rgba(99, 102, 241, 0.12));
-  border: 1px solid rgba(34, 211, 238, 0.35);
 }
 
-.sec-badge.emerald {
-  color: #d1fae5;
-  border-color: rgba(52, 211, 153, 0.35);
-  background: linear-gradient(145deg, rgba(16, 185, 129, 0.18), rgba(15, 23, 42, 0.2));
+.status-hero-glyph.violet .glyph-ring.lg {
+  border-color: rgba(167, 139, 250, 0.4);
 }
 
-.sec-titles {
+.glyph-ring.lg {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid var(--bccr-btn-info-border);
+}
+
+.stat-dot.lg {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.55);
+  z-index: 1;
+}
+
+.status-hero.ok .stat-dot.lg {
+  background: #4ade80;
+  box-shadow: 0 0 14px rgba(74, 222, 128, 0.45);
+}
+
+.status-hero.bad .stat-dot.lg {
+  background: #f87171;
+}
+
+.status-hero-body {
   min-width: 0;
 }
 
-.sec-title {
-  margin: 0 0 0.28rem;
-  font-size: 1.12rem;
-  font-weight: 720;
-  color: #f1f5f9;
+.status-hero-k {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bccr-label);
+  margin-bottom: 0.2rem;
 }
 
-.sec-sub {
+.status-hero-v {
+  display: block;
+  font-size: 1.18rem;
+  font-weight: 780;
+  color: var(--bccr-text);
+  margin-bottom: 0.28rem;
+}
+
+.status-hero-hint {
   margin: 0;
-  font-size: 0.81rem;
-  line-height: 1.62;
+  font-size: 0.82rem;
+  line-height: 1.55;
   color: var(--bccr-muted);
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+@media (max-width: 640px) {
+  .metric-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.metric-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.62rem;
+  padding: 0.78rem 0.88rem;
+  border-radius: 0.78rem;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  background: var(--bccr-hover);
+}
+
+.contract-metric {
+  background: rgba(76, 29, 149, 0.08);
+  border-color: rgba(167, 139, 250, 0.14);
+}
+
+.metric-icon {
+  font-size: 0.95rem;
+  opacity: 0.75;
+  line-height: 1;
+  margin-top: 0.12rem;
+}
+
+.metric-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.metric-label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--bccr-label);
+  margin-bottom: 0.22rem;
+}
+
+.metric-value {
+  display: block;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--bccr-text);
+  word-break: break-all;
+}
+
+.metric-value-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+}
+
+.metric-value-row .metric-value {
+  flex: 1;
+  min-width: 0;
+}
+
+.btn-copy-inline {
+  flex-shrink: 0;
+  padding: 0.18rem 0.42rem;
+  border-radius: 0.38rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: var(--bccr-card);
+  color: var(--bccr-text);
+  font-size: 0.66rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.btn-copy-inline:hover {
+  border-color: rgba(56, 189, 248, 0.35);
+  color: var(--bccr-accent-text);
+}
+
+.btn-mini.cyan {
+  border-color: rgba(34, 211, 238, 0.32);
+  background: rgba(14, 116, 144, 0.2);
+  color: var(--bccr-accent-text);
+}
+
+.node-quick-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.62rem;
+  margin-bottom: 0.95rem;
+}
+
+@media (max-width: 760px) {
+  .node-quick-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 420px) {
+  .node-quick-strip {
+    grid-template-columns: 1fr;
+  }
+}
+
+.node-quick-tile {
+  display: flex;
+  align-items: center;
+  gap: 0.62rem;
+  padding: 0.78rem 0.85rem;
+  border-radius: 0.78rem;
+  border: 1px solid rgba(34, 211, 238, 0.16);
+  background: linear-gradient(135deg, rgba(14, 116, 144, 0.12), var(--bccr-card));
+}
+
+.node-quick-icon {
+  font-size: 1rem;
+  opacity: 0.85;
+}
+
+.node-quick-k {
+  display: block;
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--bccr-label);
+  margin-bottom: 0.15rem;
+}
+
+.node-quick-v {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 780;
+  color: var(--bccr-accent-text);
+  line-height: 1.2;
+}
+
+.node-rpc-panel {
+  margin-bottom: 0.95rem;
+  padding: 0.82rem 0.92rem;
+  border-radius: 0.78rem;
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  background: rgba(8, 47, 73, 0.22);
+}
+
+.node-rpc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.42rem;
+}
+
+.node-rpc-title {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--bccr-accent-text);
+}
+
+.node-rpc-val {
+  margin: 0;
+  font-size: 0.74rem;
+  line-height: 1.48;
+  color: var(--bccr-accent-text);
+  word-break: break-all;
+}
+
+.node-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.node-group {
+  padding: 0.82rem 0.88rem;
+  border-radius: 0.82rem;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  background: var(--bccr-hover);
+}
+
+.node-group-head {
+  margin-bottom: 0.72rem;
+}
+
+.node-group-title {
+  margin: 0 0 0.18rem;
+  font-size: 0.86rem;
+  font-weight: 720;
+  color: var(--bccr-text);
+}
+
+.node-group-desc {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--bccr-muted);
+}
+
+.node-metric-grid {
+  gap: 0.55rem;
+}
+
+.node-metric {
+  background: var(--bccr-card);
+}
+
+.rate-bar-wrap {
+  margin-bottom: 0.9rem;
+  padding: 0.72rem 0.82rem;
+  border-radius: 0.72rem;
+  border: 1px solid var(--bccr-choice-surface-border);
+  background: linear-gradient(165deg, #ffffff 0%, #f0fdf4 55%, #f8fafc 100%);
+  box-shadow: var(--bccr-shadow-sm);
+}
+
+.rate-bar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.45rem;
+  font-size: 0.78rem;
+  color: var(--bccr-text-secondary);
+}
+
+.rate-bar-head strong {
+  font-size: 0.92rem;
+  font-weight: 750;
+  color: var(--bccr-success-text);
+}
+
+.rate-bar-track {
+  height: 7px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.rate-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #34d399, #22d3ee);
+  transition: width 0.5s ease;
+}
+
+.dist-bars {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.dist-row-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.28rem;
+}
+
+.dist-label {
+  font-size: 0.78rem;
+  color: var(--bccr-text);
+}
+
+.dist-count {
+  font-size: 0.78rem;
+  font-weight: 750;
+  color: var(--bccr-success-text);
+}
+
+.dist-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.dist-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.45s ease;
+}
+
+.dist-fill.status {
+  background: linear-gradient(90deg, #34d399, #6ee7b7);
+}
+
+.dist-fill.type {
+  background: linear-gradient(90deg, #38bdf8, #818cf8);
 }
 
 .mono {
@@ -825,7 +1548,7 @@ onBeforeUnmount(() => {
   padding: 0.92rem 1rem;
   border-radius: 0.92rem;
   border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(15, 23, 42, 0.5);
+  background: var(--bccr-media-bg);
 }
 
 .stat-tile.idle {
@@ -835,12 +1558,12 @@ onBeforeUnmount(() => {
 
 .stat-tile.ok {
   border-color: rgba(52, 211, 153, 0.3);
-  background: linear-gradient(125deg, rgba(16, 185, 129, 0.1), rgba(15, 23, 42, 0.55));
+  background: linear-gradient(125deg, rgba(16, 185, 129, 0.1), var(--bccr-panel-bg));
 }
 
 .stat-tile.bad {
   border-color: rgba(251, 113, 133, 0.3);
-  background: linear-gradient(125deg, rgba(251, 113, 133, 0.08), rgba(15, 23, 42, 0.52));
+  background: linear-gradient(125deg, rgba(251, 113, 133, 0.08), var(--bccr-card));
 }
 
 .stat-glyph {
@@ -861,7 +1584,7 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  border: 1px solid rgba(56, 189, 248, 0.35);
+  border: 1px solid var(--bccr-btn-info-border);
   opacity: 0.75;
 }
 
@@ -906,13 +1629,13 @@ onBeforeUnmount(() => {
   font-weight: 650;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: rgba(148, 163, 184, 0.95);
+  color: var(--bccr-label);
 }
 
 .stat-v {
   font-size: 1.06rem;
   font-weight: 780;
-  color: #f8fafc;
+  color: var(--bccr-text);
 }
 
 /* Cards */
@@ -933,8 +1656,8 @@ onBeforeUnmount(() => {
   overflow: hidden;
   border-radius: 1rem;
   border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(15, 23, 42, 0.45);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.2);
+  background: var(--bccr-card);
+  box-shadow: 0 16px 40px var(--bccr-hover);
 }
 
 .card-node {
@@ -976,7 +1699,7 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 1.02rem;
   font-weight: 700;
-  color: #f8fafc;
+  color: var(--bccr-text);
 }
 
 .card-body {
@@ -995,13 +1718,13 @@ onBeforeUnmount(() => {
 
 .pill-ok {
   background: rgba(34, 197, 94, 0.15);
-  color: #bbf7d0;
+  color: var(--bccr-success-text);
   border: 1px solid rgba(74, 222, 128, 0.32);
 }
 
 .pill-bad {
   background: rgba(248, 113, 113, 0.1);
-  color: #fecaca;
+  color: var(--bccr-danger);
   border: 1px solid rgba(251, 113, 133, 0.32);
 }
 
@@ -1009,7 +1732,7 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 0.88rem;
   line-height: 1.58;
-  color: #fecaca;
+  color: var(--bccr-danger);
 }
 
 .callout {
@@ -1025,7 +1748,7 @@ onBeforeUnmount(() => {
   font-size: 0.62rem;
   font-weight: 750;
   letter-spacing: 0.08em;
-  color: #fde047;
+  color: var(--bccr-warning-text);
   margin-bottom: 0.28rem;
 }
 
@@ -1033,13 +1756,13 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 0.84rem;
   line-height: 1.52;
-  color: rgba(254, 240, 138, 0.92);
+  color: var(--bccr-warning-text);
 }
 
 .kv-intro {
   margin: 0 0 0.52rem;
   font-size: 0.74rem;
-  color: rgba(148, 163, 184, 0.95);
+  color: var(--bccr-label);
 }
 
 .kv-table {
@@ -1055,19 +1778,19 @@ onBeforeUnmount(() => {
   align-items: baseline;
   padding: 0.52rem 0.62rem;
   border-radius: 0.52rem;
-  background: rgba(0, 0, 0, 0.16);
+  background: var(--bccr-hover);
   border: 1px solid rgba(148, 163, 184, 0.08);
 }
 
 .kv-label {
   font-size: 0.8rem;
-  color: rgba(226, 232, 240, 0.9);
+  color: var(--bccr-text);
 }
 
 .kv-value {
   margin: 0;
   font-size: 0.76rem;
-  color: rgba(226, 232, 240, 0.95);
+  color: var(--bccr-text);
   justify-self: end;
   text-align: right;
   word-break: break-all;
@@ -1083,7 +1806,7 @@ onBeforeUnmount(() => {
 .box-muted {
   padding: 0.65rem;
   border-radius: 0.55rem;
-  background: rgba(0, 0, 0, 0.12);
+  background: var(--bccr-hover);
   border: 1px dashed rgba(148, 163, 184, 0.15);
 }
 
@@ -1092,7 +1815,7 @@ onBeforeUnmount(() => {
   padding: 0.82rem 0.92rem;
   border-radius: 0.72rem;
   border: 1px solid rgba(167, 139, 250, 0.25);
-  background: linear-gradient(135deg, rgba(76, 29, 149, 0.18), rgba(15, 23, 42, 0.3));
+  background: linear-gradient(135deg, rgba(76, 29, 149, 0.18), var(--bccr-surface-muted));
 }
 
 .addr-head {
@@ -1106,14 +1829,14 @@ onBeforeUnmount(() => {
 .addr-title {
   font-size: 0.74rem;
   font-weight: 700;
-  color: #ede9fe;
+  color: #5b21b6;
 }
 
 .addr-full {
   margin: 0 0 0.42rem;
   font-size: 0.74rem;
   line-height: 1.48;
-  color: #faf5ff;
+  color: var(--bccr-text);
   word-break: break-all;
 }
 
@@ -1128,7 +1851,7 @@ onBeforeUnmount(() => {
   border-radius: 0.42rem;
   border: 1px solid rgba(196, 181, 253, 0.32);
   background: rgba(91, 33, 182, 0.2);
-  color: #e9d5ff;
+  color: #6d28d9;
   font-size: 0.71rem;
   font-weight: 650;
   cursor: pointer;
@@ -1137,11 +1860,10 @@ onBeforeUnmount(() => {
 
 /* Works board */
 .ov-board {
-  padding: 1rem 1.12rem;
-  border-radius: 1.05rem;
-  border: 1px solid rgba(52, 211, 153, 0.14);
-  background: rgba(15, 23, 42, 0.4);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
 }
 
 .ov-metrics {
@@ -1160,11 +1882,27 @@ onBeforeUnmount(() => {
 .ov-metric {
   padding: 1rem 0.92rem;
   border-radius: 0.82rem;
-  border: 1px solid rgba(148, 163, 184, 0.1);
-  background: rgba(6, 78, 59, 0.08);
+  border: 1px solid var(--bccr-choice-surface-border);
+  background: linear-gradient(165deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: var(--bccr-shadow-sm);
   display: flex;
   flex-direction: column;
   gap: 0.28rem;
+}
+
+.ov-metric-main {
+  border-color: rgba(22, 163, 74, 0.24);
+  background: linear-gradient(165deg, #ffffff 0%, #f0fdf4 55%, #f8fafc 100%);
+}
+
+.ov-metric:nth-child(2) {
+  border-color: rgba(37, 99, 235, 0.2);
+  background: linear-gradient(165deg, #ffffff 0%, #eff6ff 55%, #f8fafc 100%);
+}
+
+.ov-metric:nth-child(3) {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: linear-gradient(165deg, #ffffff 0%, #fffbeb 55%, #f8fafc 100%);
 }
 
 .ov-metric-label {
@@ -1172,7 +1910,7 @@ onBeforeUnmount(() => {
   font-weight: 650;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: rgba(167, 243, 208, 0.8);
+  color: var(--bccr-muted);
 }
 
 .ov-metric-val {
@@ -1180,24 +1918,21 @@ onBeforeUnmount(() => {
   font-size: 1.65rem;
   font-weight: 800;
   letter-spacing: -0.03em;
-  color: #ecfdf5;
+  color: var(--bccr-heading);
   line-height: 1.1;
 }
 
 .ov-metric-val.accent {
-  background: linear-gradient(115deg, #a7f3d0, #67e8f9);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--bccr-accent-text);
 }
 
 .ov-metric-val.warn {
-  color: rgba(253, 230, 138, 0.95);
+  color: var(--bccr-warning-text);
 }
 
 .ov-metric-meta {
   font-size: 0.68rem;
-  color: rgba(148, 163, 184, 0.9);
+  color: var(--bccr-text-secondary);
   line-height: 1.35;
 }
 
@@ -1207,9 +1942,16 @@ onBeforeUnmount(() => {
   border-radius: 0.55rem;
   font-size: 0.82rem;
   line-height: 1.52;
-  color: rgba(254, 240, 138, 0.94);
+  color: var(--bccr-warning-text);
   background: rgba(245, 158, 11, 0.08);
   border: 1px solid rgba(251, 191, 36, 0.22);
+}
+
+.pie-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.92rem;
+  margin-top: 0.25rem;
 }
 
 .dist-grid {
@@ -1227,15 +1969,16 @@ onBeforeUnmount(() => {
 .dist-block {
   padding: 0.82rem 0.92rem;
   border-radius: 0.82rem;
-  border: 1px solid rgba(148, 163, 184, 0.1);
-  background: rgba(0, 0, 0, 0.14);
+  border: 1px solid var(--bccr-choice-surface-border);
+  background: var(--bccr-choice-surface-bg);
+  box-shadow: var(--bccr-shadow-sm);
 }
 
 .dist-h {
   margin: 0 0 0.18rem;
   font-size: 0.82rem;
   font-weight: 700;
-  color: #ecfdf5;
+  color: var(--bccr-text);
 }
 
 .dist-desc {
@@ -1257,11 +2000,11 @@ onBeforeUnmount(() => {
   padding: 0.35rem 0.62rem;
   border-radius: 999px;
   border: 1px solid rgba(148, 163, 184, 0.16);
-  background: rgba(15, 23, 42, 0.5);
+  background: var(--bccr-media-bg);
 }
 
 .chip-k {
-  color: rgba(148, 163, 184, 0.95);
+  color: var(--bccr-label);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-size: 0.68rem;
@@ -1269,7 +2012,7 @@ onBeforeUnmount(() => {
 
 .chip-v {
   font-weight: 760;
-  color: #a7f3d0;
+  color: var(--bccr-success-text);
 }
 
 .chip-type .chip-v {
@@ -1280,37 +2023,6 @@ onBeforeUnmount(() => {
   margin: 0.65rem 0 0;
   font-size: 0.79rem;
   line-height: 1.55;
-}
-
-.api-foot {
-  margin-top: 1rem;
-  font-size: 0.78rem;
-  color: var(--bccr-muted);
-}
-
-.api-foot summary {
-  cursor: pointer;
-  color: rgba(167, 243, 208, 0.75);
-  font-weight: 600;
-}
-
-.api-inner {
-  margin-top: 0.5rem;
-  padding: 0.75rem 0.92rem;
-  border-radius: 0.62rem;
-  border: 1px solid rgba(148, 163, 184, 0.1);
-  background: rgba(0, 0, 0, 0.12);
-}
-
-.api-line {
-  margin: 0 0 0.35rem;
-  color: rgba(186, 230, 253, 0.85);
-}
-
-.api-ul {
-  margin: 0;
-  padding-left: 1.05rem;
-  line-height: 1.6;
 }
 
 </style>

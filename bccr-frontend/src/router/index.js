@@ -46,12 +46,8 @@ const router = createRouter({
         {
           path: 'works/my',
           name: 'works-my',
-          component: () => import('@/views/ComingSoon.vue'),
-          meta: { roles: ['user', 'agent'] },
-          props: {
-            title: '我的作品',
-            subtitle: '按作者地址过滤的本人作品列表（GET /api/work/my）。',
-          },
+          component: () => import('@/views/works/MyWorksView.vue'),
+          meta: { roles: ['admin', 'user', 'agent'] },
         },
         {
           path: 'works/register',

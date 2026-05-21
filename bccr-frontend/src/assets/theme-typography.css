@@ -1,0 +1,74 @@
+/**
+ * 全局文字色阶（浅色主题）
+ */
+
+body {
+  color: var(--bccr-text);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: var(--bccr-heading);
+}
+
+p {
+  color: var(--bccr-text);
+}
+
+small,
+.text-muted,
+.muted {
+  color: var(--bccr-muted);
+}
+
+label,
+.lbl,
+.field-label {
+  color: var(--bccr-label);
+}
+
+::placeholder {
+  color: var(--bccr-placeholder);
+  opacity: 1;
+}
+
+input,
+textarea,
+select {
+  color: var(--bccr-text);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--bccr-placeholder);
+}
+
+code,
+.mono {
+  color: var(--bccr-text-secondary);
+}
+
+strong {
+  color: var(--bccr-text-strong);
+}
+
+dt,
+.meta-label {
+  color: var(--bccr-muted);
+}
+
+dd {
+  color: var(--bccr-text);
+}
+
+a {
+  color: var(--bccr-link);
+}
+
+a:hover {
+  color: var(--bccr-link-hover);
+}

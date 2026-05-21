@@ -142,15 +142,12 @@ function fileUrlDisplay(u) {
     <div class="page">
       <header class="hero">
         <h1 class="title">登记作品</h1>
-        <p class="lead">
-          填写唯一 ID 与名称，可选上传源文件以提取指纹并上链；作者信息由当前登录账号自动携带。
-        </p>
       </header>
 
       <form v-if="!successPayload" class="card form-card" @submit.prevent="onSubmit">
         <div class="card-head">
           <h2 class="h2">作品信息</h2>
-          <p class="card-desc">标 * 为必填；登记接口 <code class="code">POST /api/work/register</code></p>
+          <p class="card-desc">标 * 为必填项。</p>
         </div>
 
         <div class="grid">
@@ -336,10 +333,6 @@ function fileUrlDisplay(u) {
   font-size: 1.55rem;
   font-weight: 750;
   letter-spacing: -0.02em;
-  background: linear-gradient(115deg, #e2e8f0 0%, #7dd3fc 45%, #a78bfa 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
 }
 
 .lead {
@@ -353,20 +346,20 @@ function fileUrlDisplay(u) {
   font-size: 0.76rem;
   padding: 0.12rem 0.35rem;
   border-radius: 0.35rem;
-  background: rgba(0, 0, 0, 0.28);
-  color: #a5b4fc;
+  background: var(--bccr-shadow-md);
+  color: var(--bccr-accent-text);
 }
 
 .card {
   padding: 1.35rem 1.4rem;
   border-radius: 1rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(15, 23, 42, 0.42);
+  background: var(--bccr-card);
   margin-bottom: 1rem;
 }
 
 .form-card {
-  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.06), 0 20px 50px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.06), 0 20px 50px var(--bccr-code-bg);
 }
 
 .card-head {
@@ -417,7 +410,7 @@ function fileUrlDisplay(u) {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: rgba(148, 163, 184, 0.9);
+  color: var(--bccr-muted);
 }
 
 .opt {
@@ -429,7 +422,7 @@ function fileUrlDisplay(u) {
 }
 
 .req {
-  color: #f87171;
+  color: var(--bccr-danger);
   font-style: normal;
 }
 
@@ -437,7 +430,7 @@ function fileUrlDisplay(u) {
   padding: 0.55rem 0.7rem;
   border-radius: 0.5rem;
   border: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(15, 23, 42, 0.65);
+  background: var(--bccr-card);
   color: var(--bccr-text);
   font-size: 0.9rem;
   transition:
@@ -473,9 +466,9 @@ function fileUrlDisplay(u) {
   flex-shrink: 0;
   padding: 0 0.9rem;
   border-radius: 0.5rem;
-  border: 1px solid rgba(56, 189, 248, 0.35);
+  border: 1px solid var(--bccr-btn-info-border);
   background: rgba(34, 211, 238, 0.08);
-  color: #a5f3fc;
+  color: var(--bccr-accent-text);
   font-size: 0.82rem;
   font-weight: 650;
   cursor: pointer;
@@ -510,7 +503,7 @@ function fileUrlDisplay(u) {
   background: none;
   font-size: 0.84rem;
   font-weight: 600;
-  color: #7dd3fc;
+  color: var(--bccr-btn-info-text);
   cursor: pointer;
   text-align: left;
 }
@@ -538,7 +531,7 @@ function fileUrlDisplay(u) {
   border-radius: 0.45rem;
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(248, 113, 113, 0.25);
-  color: #fecaca;
+  color: var(--bccr-danger);
   font-size: 0.86rem;
 }
 
@@ -607,7 +600,7 @@ function fileUrlDisplay(u) {
   margin: 0 0 0.2rem;
   font-size: 1.15rem;
   font-weight: 700;
-  color: #bbf7d0;
+  color: var(--bccr-success-text);
 }
 
 .success-sub {
@@ -622,7 +615,7 @@ function fileUrlDisplay(u) {
   gap: 0.75rem 1rem;
   padding: 1rem;
   border-radius: 0.75rem;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--bccr-hover);
   border: 1px solid rgba(148, 163, 184, 0.1);
 }
 
@@ -645,7 +638,7 @@ function fileUrlDisplay(u) {
 
 .kv-v {
   font-size: 0.88rem;
-  color: #e2e8f0;
+  color: var(--bccr-text);
 }
 
 .status-pill {
@@ -657,7 +650,7 @@ function fileUrlDisplay(u) {
   font-weight: 600;
   background: rgba(59, 130, 246, 0.15);
   border: 1px solid rgba(96, 165, 250, 0.3);
-  color: #bfdbfe;
+  color: var(--bccr-pill-text);
 }
 
 .mono {
@@ -672,7 +665,7 @@ function fileUrlDisplay(u) {
 
 .file-link {
   font-size: 0.8rem;
-  color: #7dd3fc;
+  color: var(--bccr-btn-info-text);
   word-break: break-all;
 }
 
@@ -690,7 +683,7 @@ function fileUrlDisplay(u) {
   margin: 0 0 0.65rem;
   font-size: 0.95rem;
   font-weight: 650;
-  color: #e2e8f0;
+  color: var(--bccr-text);
 }
 
 .hint-loading,
@@ -705,7 +698,7 @@ function fileUrlDisplay(u) {
 .err-inline {
   margin: 0 0 0.5rem;
   font-size: 0.84rem;
-  color: #fecaca;
+  color: var(--bccr-danger);
 }
 
 .recheck-again {
@@ -738,12 +731,12 @@ function fileUrlDisplay(u) {
   font-weight: 600;
   cursor: pointer;
   border: 1px solid rgba(148, 163, 184, 0.25);
-  background: rgba(15, 23, 42, 0.4);
+  background: var(--bccr-surface-muted);
   color: var(--bccr-muted);
 }
 
 .btn-outline:hover {
-  color: #e2e8f0;
+  color: var(--bccr-text);
   border-color: rgba(148, 163, 184, 0.4);
 }
 

@@ -1,26 +1,34 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import FileDropZone from '@/components/work/FileDropZone.vue'
 import SimilarityMatchList from '@/components/work/SimilarityMatchList.vue'
 import WorkTypePills from '@/components/work/WorkTypePills.vue'
 import {
+  buildManualCheckSourcePreview,
   formatResultLevel,
   formatSimilarity,
   levelToneClass,
+  pickSourceFileUrl,
+  sourceThumbFromPlagiarismRecord,
 } from '@/lib/plagiarismDisplay'
 import { useAuthStore } from '@/stores/auth'
 import * as plagiarismApi from '@/api/plagiarism'
 import {
+  fetchMyWorkList,
   fetchWorkDetail,
   formatWorkDetail,
   formatWorkSummary,
+  normalizeListPage,
+  normalizeWorkIdParam,
+  recheckWork,
 } from '@/api/work'
 
 const router = useRouter()
+const route = useRoute()
 const auth = useAuthStore()
 
-/** @type {'check' | 'records'} */
+/** @type {'check' | 'recheck' | 'records'} */
 const mainTab = ref('check')
 
 const file = ref(/** @type {File | null} */ (null))
@@ -31,6 +39,25 @@ const checkError = ref('')
 const checkResults = ref([])
 const manualCompleted = ref(false)
 
+/** 链上作品再查重：作品列表与授权页一致，使用 GET /api/work/my + 关键字；选定后 POST /api/work/{workId}/recheck */
+const recheckWorkSearchInput = ref('')
+const recheckWorkSuggestOpen = ref(false)
+/** @type {import('vue').Ref<ReturnType<typeof formatWorkSummary>[]>} */
+const recheckWorkSuggestions = ref([])
+const recheckWorkSearchLoading = ref(false)
+const recheckWorkSearchError = ref('')
+const recheckWorkId = ref('')
+const recheckWorkConfirmed = ref(false)
+/** @type {import('vue').Ref<ReturnType<typeof formatWorkSummary> | null>} */
+const recheckWorkPick = ref(null)
+const recheckLoading = ref(false)
+const recheckError = ref('')
+/** @type {import('vue').Ref<Record<string, unknown>[]>} */
+const recheckResults = ref([])
+const recheckCompleted = ref(false)
+let recheckWorkSuggestTimer = null
+let recheckWorkBlurTimer = null
+
 const recordTab = ref('mine')
 const workIdQuery = ref('')
 const checkIdQuery = ref('')
@@ -39,11 +66,9 @@ const recordsLoading = ref(false)
 const recordsError = ref('')
 /** @type {import('vue').Ref<Record<string, unknown>[]>} */
 const recordList = ref([])
-/** 详情弹层 */
 const detailModalOpen = ref(false)
 /** @type {import('vue').Ref<Record<string, unknown> | null>} */
 const detailModalRecord = ref(null)
-/** 列表行展示：workId → 作品摘要（接口拉取） */
 const workSummaryById = ref(
   /** @type {Record<string, ReturnType<typeof formatWorkSummary> & { unavailable?: boolean }>} */ ({}),
 )
@@ -53,12 +78,35 @@ const modalSourceWork = ref(null)
 /** @type {import('vue').Ref<ReturnType<typeof formatWorkDetail> | null>} */
 const modalTargetWork = ref(null)
 const modalWorksLoading = ref(false)
-/** 防止连续打开弹层时异步回调覆盖较新的记录 */
 let modalLoadSeq = 0
 
 const blockchainFromUser = computed(() => {
   const u = /** @type {Record<string, unknown>} */ (auth.user || {})
   return String(u.blockchainAddress ?? u.blockChainAddress ?? '').trim()
+})
+
+const recheckWorkCoverUrl = computed(() => String(recheckWorkPick.value?.cover ?? '').trim())
+
+watch(recheckWorkSearchInput, (v) => {
+  if (recheckWorkSuggestTimer) clearTimeout(recheckWorkSuggestTimer)
+  recheckWorkSearchError.value = ''
+  const t = v.trim()
+  if (recheckWorkConfirmed.value && recheckWorkId.value && t === recheckWorkId.value) {
+    return
+  }
+  if (recheckWorkConfirmed.value && recheckWorkId.value && t !== recheckWorkId.value) {
+    clearRecheckWorkSelectionFull()
+  }
+  const q = v.trim()
+  if (q.length < 1) {
+    recheckWorkSuggestions.value = []
+    recheckWorkSuggestOpen.value = false
+    return
+  }
+  recheckWorkSuggestTimer = setTimeout(() => {
+    recheckWorkSuggestTimer = null
+    void fetchRecheckWorkSuggestions(q)
+  }, 260)
 })
 
 watch(file, () => {
@@ -98,6 +146,10 @@ async function openRecordModal(rec) {
   modalTargetWork.value = null
   modalWorksLoading.value = true
   const pair = comparePairFromRecord(rec)
+  const sourceFromRecord = buildManualCheckSourcePreview(rec)
+  if (sourceFromRecord) {
+    modalSourceWork.value = sourceFromRecord
+  }
   const tasks = []
   if (pair.sourceId) {
     tasks.push(
@@ -107,7 +159,18 @@ async function openRecordModal(rec) {
           const o = /** @type {Record<string, unknown>} */ (
             typeof raw === 'object' && raw ? raw : {}
           )
-          modalSourceWork.value = formatWorkDetail(o)
+          const detail = formatWorkDetail(o)
+          const keepManualImage =
+            sourceFromRecord?.kind === 'image' &&
+            Boolean(sourceFromRecord.cover || sourceFromRecord.displayImageUrl)
+          modalSourceWork.value = keepManualImage
+            ? {
+                ...detail,
+                kind: 'image',
+                cover: sourceFromRecord.cover,
+                displayImageUrl: sourceFromRecord.displayImageUrl,
+              }
+            : detail
           workSummaryById.value = {
             ...workSummaryById.value,
             [pair.sourceId]: formatWorkSummary(o),
@@ -115,7 +178,11 @@ async function openRecordModal(rec) {
         })
         .catch(() => {
           if (seq !== modalLoadSeq) return
-          modalSourceWork.value = null
+          if (sourceFromRecord) {
+            modalSourceWork.value = sourceFromRecord
+          } else {
+            modalSourceWork.value = null
+          }
           workSummaryById.value = {
             ...workSummaryById.value,
             [pair.sourceId]: {
@@ -199,17 +266,31 @@ function comparePairFromRecord(rec) {
 
 const comparePair = computed(() => comparePairFromRecord(detailModalRecord.value))
 
-/**
- * 列表行：作品标题 · 作者（优先接口缓存，其次记录内嵌字段，最后 workId）
- * @param {Record<string, unknown>} rec
- * @param {'source' | 'target'} side
- */
 function recordWorkLine(rec, side) {
   const id =
     side === 'source'
       ? String(rec.sourceWorkId ?? '').trim()
       : String(rec.targetWorkId ?? '').trim()
-  if (!id) return '—'
+  if (!id) {
+    if (side === 'source') {
+      const title = pickRecStr(rec, [
+        'sourceWorkName',
+        'sourceTitle',
+        'sourceName',
+        'sourceWorkTitle',
+      ])
+      const author = pickRecStr(rec, [
+        'sourceAuthor',
+        'sourceAuthorName',
+        'sourceAuthorAddress',
+        'checkerAddress',
+        'checkerName',
+      ])
+      if (title) return author ? `${title} · ${author}` : title
+      if (pickSourceFileUrl(rec)) return '手动上传文件'
+    }
+    return '—'
+  }
 
   if (listWorksPrefetching.value && workSummaryById.value[id] == null) {
     return '作品信息加载中…'
@@ -261,11 +342,11 @@ function recordWorkLine(rec, side) {
   return id
 }
 
-/**
- * @param {Record<string, unknown>} rec
- * @param {'source' | 'target'} side
- */
 function workThumbForRecord(rec, side) {
+  if (side === 'source') {
+    const manualThumb = sourceThumbFromPlagiarismRecord(rec)
+    if (manualThumb) return manualThumb
+  }
   const id =
     side === 'source'
       ? String(rec.sourceWorkId ?? '').trim()
@@ -276,7 +357,6 @@ function workThumbForRecord(rec, side) {
   return String(sum.cover || '').trim()
 }
 
-/** @param {ReturnType<typeof formatWorkDetail> | null | undefined} d */
 function workModalPreviewImage(d) {
   if (!d) return ''
   if (d.kind === 'image')
@@ -284,7 +364,6 @@ function workModalPreviewImage(d) {
   return String(d.cover || d.displayImageUrl || '').trim()
 }
 
-/** @param {ReturnType<typeof formatWorkDetail> | null | undefined} d */
 function workModalTextPreview(d) {
   if (!d || d.kind !== 'text') return ''
   return String(d.textPreview || '').trim()
@@ -357,6 +436,8 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onDocKeydown)
+  if (recheckWorkSuggestTimer) clearTimeout(recheckWorkSuggestTimer)
+  if (recheckWorkBlurTimer) clearTimeout(recheckWorkBlurTimer)
 })
 
 function formatTime(v) {
@@ -394,6 +475,143 @@ async function runManualCheck() {
   }
 }
 
+/** 将后端 CheckResult 规范为 SimilarityMatchList 所需字段 */
+/** @param {Record<string, unknown>} raw */
+function normalizeCheckResultRow(raw) {
+  if (!raw || typeof raw !== 'object') return /** @type {Record<string, unknown>} */ ({})
+  const o = /** @type {Record<string, unknown>} */ (raw)
+  return {
+    checkId: o.checkId ?? o.id ?? '',
+    similarity: o.similarity ?? o.similarityScore ?? o.score,
+    resultLevel: o.resultLevel ?? o.level ?? o.result,
+    matchWorkName: o.matchWorkName ?? o.targetWorkName ?? o.comparedWorkName ?? o.workName,
+    matchWorkId: o.matchWorkId ?? o.targetWorkId ?? o.comparedWorkId ?? o.workId,
+    matchAuthorAddress: o.matchAuthorAddress ?? o.targetAuthorAddress ?? o.authorAddress,
+  }
+}
+
+async function fetchRecheckWorkSuggestions(keyword) {
+  const kw = keyword.trim()
+  if (!kw) return
+  if (!auth.isLoggedIn) {
+    recheckWorkSearchError.value = '请先登录'
+    recheckWorkSuggestions.value = []
+    return
+  }
+  recheckWorkSearchLoading.value = true
+  recheckWorkSuggestOpen.value = true
+  recheckWorkSuggestions.value = []
+  recheckWorkSearchError.value = ''
+  try {
+    const data = await fetchMyWorkList({
+      keyword: kw,
+      workName: kw,
+      page: 1,
+      size: 24,
+    })
+    const page = normalizeListPage(data)
+    recheckWorkSuggestions.value = page.items.map((row) =>
+      formatWorkSummary(/** @type {Record<string, unknown>} */ (row)),
+    )
+  } catch (e) {
+    recheckWorkSearchError.value = e?.message || '作品搜索失败'
+    recheckWorkSuggestions.value = []
+  } finally {
+    recheckWorkSearchLoading.value = false
+  }
+}
+
+function clearRecheckWorkSelectionFull() {
+  recheckWorkId.value = ''
+  recheckWorkConfirmed.value = false
+  recheckWorkPick.value = null
+}
+
+function clearRecheckWorkChip() {
+  recheckWorkSearchInput.value = ''
+  recheckWorkSuggestions.value = []
+  recheckWorkSuggestOpen.value = false
+  clearRecheckWorkSelectionFull()
+}
+
+/** @param {ReturnType<typeof formatWorkSummary>} s */
+function selectRecheckWorkFromList(s) {
+  recheckWorkSearchError.value = ''
+  const id = String(s.id ?? '').trim()
+  if (!id) {
+    recheckWorkSearchError.value = '无效作品'
+    return
+  }
+  recheckWorkPick.value = s
+  recheckWorkId.value = id
+  recheckWorkConfirmed.value = true
+  recheckWorkSearchInput.value = id
+  recheckWorkSuggestions.value = []
+  recheckWorkSuggestOpen.value = false
+}
+
+function onRecheckWorkComboFocus() {
+  recheckError.value = ''
+  if (recheckWorkBlurTimer) {
+    clearTimeout(recheckWorkBlurTimer)
+    recheckWorkBlurTimer = null
+  }
+  const q = recheckWorkSearchInput.value.trim()
+  if (recheckWorkConfirmed.value && recheckWorkId.value && q === recheckWorkId.value) {
+    recheckWorkSuggestOpen.value = false
+    return
+  }
+  if (q) {
+    recheckWorkSuggestOpen.value = true
+    if (!recheckWorkSearchLoading.value && recheckWorkSuggestions.value.length === 0) {
+      void fetchRecheckWorkSuggestions(q)
+    }
+  }
+}
+
+function onRecheckWorkComboBlur() {
+  if (recheckWorkBlurTimer) clearTimeout(recheckWorkBlurTimer)
+  recheckWorkBlurTimer = setTimeout(() => {
+    recheckWorkBlurTimer = null
+    recheckWorkSuggestOpen.value = false
+  }, 200)
+}
+
+/** @param {MouseEvent} ev */
+function onRecheckSuggestListMouseDown(ev) {
+  ev.preventDefault()
+}
+
+async function runRecheckChain() {
+  recheckError.value = ''
+  recheckResults.value = []
+  recheckCompleted.value = false
+  const id = normalizeWorkIdParam(recheckWorkId.value)
+  if (!id || !recheckWorkConfirmed.value) {
+    recheckError.value = '请通过搜索并从下拉列表中选择要再查重的作品'
+    return
+  }
+  if (!auth.isLoggedIn) {
+    recheckError.value = '请先登录'
+    return
+  }
+  recheckLoading.value = true
+  try {
+    const data = await recheckWork(id)
+    const arr = Array.isArray(data) ? data : []
+    recheckResults.value = arr.map((row) =>
+      normalizeCheckResultRow(
+        /** @type {Record<string, unknown>} */ (typeof row === 'object' && row ? row : {}),
+      ),
+    )
+    recheckCompleted.value = true
+  } catch (e) {
+    recheckError.value = e?.message || '再查重失败'
+  } finally {
+    recheckLoading.value = false
+  }
+}
+
 async function loadMyRecords() {
   const addr = blockchainFromUser.value
   if (!addr) {
@@ -418,7 +636,7 @@ async function loadMyRecords() {
 }
 
 async function loadByWorkId() {
-  const id = workIdQuery.value.trim()
+  const id = normalizeWorkIdParam(workIdQuery.value.trim())
   if (!id) {
     recordsError.value = '请输入作品 ID'
     return
@@ -463,6 +681,25 @@ async function loadByCheckId() {
     recordsLoading.value = false
   }
 }
+
+/** 从路由 query 进入时（如审核页「查看相似度对比记录」）：打开查重记录并按作品 ID 拉取列表 */
+function pickQueryWorkId() {
+  const raw = route.query.workId
+  const s = Array.isArray(raw) ? raw[0] : raw
+  return normalizeWorkIdParam(String(s ?? ''))
+}
+
+watch(
+  () => pickQueryWorkId(),
+  async (wid) => {
+    if (!wid) return
+    mainTab.value = 'records'
+    recordTab.value = 'work'
+    if (workIdQuery.value !== wid) workIdQuery.value = wid
+    await loadByWorkId()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -470,7 +707,7 @@ async function loadByCheckId() {
     <div class="check-page">
       <header class="hero">
         <h1 class="title">查重中心</h1>
-        <p class="lead">上传作品与全库比对，或检索历史查重链上记录。</p>
+        <p class="lead">上传作品与全库比对；对已登记链上作品再查重；或检索历史查重记录。</p>
         <div class="main-tabs" role="tablist" aria-label="查重子功能">
           <button
             type="button"
@@ -482,6 +719,17 @@ async function loadByCheckId() {
           >
             <span class="main-tab-ic" aria-hidden="true">◈</span>
             手动查重
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class="main-tab"
+            :class="{ active: mainTab === 'recheck' }"
+            :aria-selected="mainTab === 'recheck'"
+            @click="mainTab = 'recheck'"
+          >
+            <span class="main-tab-ic" aria-hidden="true">◎</span>
+            链上作品再查重
           </button>
           <button
             type="button"
@@ -533,14 +781,150 @@ async function loadByCheckId() {
         </button>
 
         <div v-if="checkResults.length" class="results-block">
-          <h3 class="results-title">比对结果</h3>
+          <h3 class="results-title">上传比对结果</h3>
           <SimilarityMatchList :items="checkResults" @open-work="goWorkDetail" />
         </div>
         <p
-          v-else-if="manualCompleted && !checkLoading && !checkError"
+          v-if="manualCompleted && !checkLoading && !checkError && !checkResults.length"
           class="empty-ok"
         >
           库内未发现达到阈值的相似作品。
+        </p>
+      </section>
+
+      <!-- 链上作品再查重 -->
+      <section v-show="mainTab === 'recheck'" class="card card-glow recheck-card">
+        <div class="card-head">
+          <h2 class="h2">链上作品再查重</h2>
+          <p class="card-desc">
+            对<strong>本人已登记</strong>的作品再次与全库比对。作品列表与「授权」页相同：输入名称关键字后从下拉中点选。
+          </p>
+        </div>
+
+        <div class="recheck-pick-shell">
+          <div class="field bccr-work-pick-combo recheck-work-pick-host">
+            <span class="lbl">待查重作品 <em class="req">*</em></span>
+            <p class="field-hint recheck-pick-hint">
+              输入<strong>作品名称关键字</strong>后自动请求本人作品列表；也可输入作品 ID 触发检索。在结果中点击一行完成选择。
+            </p>
+            <div class="combo-wrap">
+              <div class="combo-input-row">
+                <input
+                  v-model="recheckWorkSearchInput"
+                  type="text"
+                  class="inp combo-inp"
+                  placeholder="输入作品名称关键字…"
+                  autocomplete="off"
+                  role="combobox"
+                  :aria-expanded="recheckWorkSuggestOpen"
+                  aria-autocomplete="list"
+                  @focus="onRecheckWorkComboFocus"
+                  @blur="onRecheckWorkComboBlur"
+                  @keydown.escape.prevent="recheckWorkSuggestOpen = false"
+                />
+                <span
+                  v-if="recheckWorkSearchLoading"
+                  class="combo-loading"
+                  aria-hidden="true"
+                  title="搜索中"
+                >
+                  <span class="combo-loading-spin">⟳</span>
+                </span>
+              </div>
+              <ul
+                v-if="recheckWorkSuggestOpen && recheckWorkSearchInput.trim()"
+                class="suggest-dd bccr-scroll-slim"
+                role="listbox"
+                @mousedown="onRecheckSuggestListMouseDown"
+              >
+                <li
+                  v-if="recheckWorkSearchLoading"
+                  key="rw-loading"
+                  class="suggest-row suggest-row--status"
+                >
+                  正在搜索作品…
+                </li>
+                <li
+                  v-else-if="!recheckWorkSuggestions.length"
+                  key="rw-empty"
+                  class="suggest-row suggest-row--status"
+                >
+                  无匹配作品
+                </li>
+                <template v-else>
+                  <li
+                    v-for="(s, idx) in recheckWorkSuggestions"
+                    :key="`${s.id}-${idx}`"
+                    role="option"
+                    class="suggest-row suggest-row--pick"
+                    @mousedown.prevent.stop="() => selectRecheckWorkFromList(s)"
+                  >
+                    <div class="suggest-av">
+                      <img
+                        v-if="s.cover"
+                        :src="s.cover"
+                        alt=""
+                        class="suggest-av-img"
+                        loading="lazy"
+                      />
+                      <span v-else class="suggest-av-ph" aria-hidden="true">{{
+                        (s.title || '作').slice(0, 1).toUpperCase()
+                      }}</span>
+                    </div>
+                    <div class="suggest-txt">
+                      <span class="suggest-nick">{{ s.title || '未命名作品' }}</span>
+                      <span class="suggest-un mono">{{ s.id }}</span>
+                      <span v-if="s.type" class="suggest-type">{{ s.type }}</span>
+                    </div>
+                  </li>
+                </template>
+              </ul>
+            </div>
+            <p v-if="recheckWorkSearchError" class="err-inline">{{ recheckWorkSearchError }}</p>
+            <div v-if="recheckWorkConfirmed && recheckWorkPick" class="selected-strip selected-strip--work">
+              <div class="selected-av">
+                <img
+                  v-if="recheckWorkCoverUrl"
+                  :src="recheckWorkCoverUrl"
+                  alt=""
+                  class="selected-av-img"
+                />
+                <span v-else class="selected-av-ph" aria-hidden="true">{{
+                  (recheckWorkPick.title || '作').slice(0, 1).toUpperCase()
+                }}</span>
+              </div>
+              <div class="selected-txt">
+                <span class="selected-nick">{{ recheckWorkPick.title || '未命名作品' }}</span>
+                <span class="selected-un mono">{{ recheckWorkPick.id }}</span>
+                <span v-if="recheckWorkPick.type" class="selected-meta">{{ recheckWorkPick.type }}</span>
+              </div>
+              <button type="button" class="btn-strip-change" @click="clearRecheckWorkChip">更换</button>
+            </div>
+          </div>
+        </div>
+
+        <p v-if="recheckError" class="err">{{ recheckError }}</p>
+
+        <button
+          type="button"
+          class="btn-run btn-run--secondary"
+          :disabled="recheckLoading || !recheckWorkConfirmed || !recheckWorkId || !auth.isLoggedIn"
+          @click="runRecheckChain"
+        >
+          <span class="btn-run-inner">
+            {{ recheckLoading ? '正在再查重…' : '对选中作品再查重' }}
+          </span>
+        </button>
+
+        <div v-if="recheckResults.length" class="results-block results-block--recheck">
+          <h3 class="results-title">再查重结果</h3>
+          <SimilarityMatchList :items="recheckResults" @open-work="goWorkDetail" />
+        </div>
+        <p
+          v-if="recheckCompleted && !recheckLoading && !recheckError && !recheckResults.length"
+          class="empty-ok"
+        >
+          再查重完成：库内未发现相似作品。
         </p>
       </section>
 
@@ -637,13 +1021,12 @@ async function loadByCheckId() {
 
         <p v-if="recordsError" class="err">{{ recordsError }}</p>
 
-        <!-- 紧凑列表：固定高度滚动，避免记录多时页面过长 -->
         <div v-if="recordList.length" class="records-panel">
           <div class="records-toolbar">
             <span class="records-count">共 {{ recordList.length }} 条</span>
             <span class="records-hint">点击一行打开详情 · 对比双方作品</span>
           </div>
-          <div class="records-scroll" role="region" aria-label="查重记录列表">
+          <div class="records-scroll bccr-scroll-slim" role="region" aria-label="查重记录列表">
             <div class="records-inner">
               <button
                 v-for="rec in recordList"
@@ -746,8 +1129,16 @@ async function loadByCheckId() {
             <div class="rec-compare-grid">
               <div class="rec-wcard rec-wcard--src">
                 <span class="rec-wtag">源作品</span>
-                <div class="rec-wpreview" :aria-busy="modalWorksLoading || undefined">
-                  <div v-if="modalWorksLoading" class="rec-preview-skel">加载作品与预览…</div>
+                <div
+                  class="rec-wpreview"
+                  :aria-busy="(modalWorksLoading && !modalSourceWork) || undefined"
+                >
+                  <div
+                    v-if="modalWorksLoading && !modalSourceWork"
+                    class="rec-preview-skel"
+                  >
+                    加载作品与预览…
+                  </div>
                   <template v-else-if="modalSourceWork">
                     <img
                       v-if="workModalPreviewImage(modalSourceWork)"
@@ -772,7 +1163,10 @@ async function loadByCheckId() {
                 <p v-if="(modalSourceWork?.author || '').trim()" class="rec-wauthor">
                   {{ modalSourceWork.author }}
                 </p>
-                <code class="rec-wid mono">{{ comparePair.sourceId || '—' }}</code>
+                <code class="rec-wid mono">{{
+                  comparePair.sourceId ||
+                  (modalSourceWork?.fromManualUpload ? '手动上传' : '—')
+                }}</code>
                 <button
                   type="button"
                   class="rec-wbtn"
@@ -864,10 +1258,6 @@ async function loadByCheckId() {
   font-size: 1.55rem;
   font-weight: 750;
   letter-spacing: -0.02em;
-  background: linear-gradient(120deg, #e2e8f0 0%, #93c5fd 55%, #c4b5fd 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
 }
 
 .lead {
@@ -883,7 +1273,7 @@ async function loadByCheckId() {
   padding: 0.35rem;
   border-radius: 0.85rem;
   border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(15, 23, 42, 0.55);
+  background: var(--bccr-panel-bg);
 }
 
 .main-tab {
@@ -907,11 +1297,11 @@ async function loadByCheckId() {
 }
 
 .main-tab:hover {
-  color: #e2e8f0;
+  color: var(--bccr-text);
 }
 
 .main-tab.active {
-  color: #f8fafc;
+  color: var(--bccr-text);
   background: linear-gradient(135deg, rgba(59, 130, 246, 0.35), rgba(99, 102, 241, 0.28));
   box-shadow: 0 4px 18px rgba(59, 130, 246, 0.18);
 }
@@ -925,17 +1315,17 @@ async function loadByCheckId() {
   padding: 1.35rem 1.4rem;
   border-radius: 1rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(15, 23, 42, 0.42);
+  background: var(--bccr-card);
   margin-bottom: 1rem;
 }
 
 .card-glow {
-  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.06), 0 18px 48px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.06), 0 18px 48px var(--bccr-code-bg);
 }
 
 .records-card {
-  border-color: rgba(167, 139, 250, 0.12);
-  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.05), 0 18px 48px rgba(0, 0, 0, 0.2);
+  border-color: var(--bccr-choice-surface-border);
+  box-shadow: var(--bccr-shadow-sm);
 }
 
 .card-head {
@@ -970,7 +1360,7 @@ async function loadByCheckId() {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: rgba(148, 163, 184, 0.88);
+  color: var(--bccr-muted);
 }
 
 .upload-block {
@@ -986,7 +1376,7 @@ async function loadByCheckId() {
   border-radius: 0.45rem;
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(248, 113, 113, 0.25);
-  color: #fecaca;
+  color: var(--bccr-danger);
   font-size: 0.86rem;
 }
 
@@ -1024,6 +1414,85 @@ async function loadByCheckId() {
   color: #fff;
 }
 
+.recheck-section {
+  margin-top: 1.35rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.sub-h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 650;
+  color: var(--bccr-text);
+}
+
+.recheck-lead {
+  margin: 0 0 0.9rem;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  color: var(--bccr-muted);
+}
+
+.recheck-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+}
+
+.recheck-field {
+  flex: 1 1 12rem;
+  min-width: 10rem;
+}
+
+.btn-recheck-search {
+  padding: 0.48rem 0.95rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--bccr-btn-info-border);
+  background: var(--bccr-btn-info-bg);
+  color: var(--bccr-btn-info-text);
+  font-size: 0.86rem;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.btn-recheck-search:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-recheck-search:hover:not(:disabled) {
+  background: var(--bccr-btn-info-hover);
+}
+
+.hint {
+  margin: 0 0 0.65rem;
+  font-size: 0.82rem;
+  color: var(--bccr-muted);
+}
+
+.select-recheck {
+  min-width: 0;
+  width: 100%;
+  cursor: pointer;
+}
+
+.recheck-section .btn-run {
+  margin-top: 0.65rem;
+}
+
+.recheck-section .btn-run--secondary {
+  background: linear-gradient(135deg, #0e7490, #2563eb);
+  box-shadow: 0 8px 24px rgba(14, 116, 144, 0.28);
+}
+
+.results-block--recheck {
+  margin-top: 1.1rem;
+}
+
 .results-block {
   margin-top: 1.35rem;
   padding-top: 1.15rem;
@@ -1034,7 +1503,7 @@ async function loadByCheckId() {
   margin: 0 0 0.75rem;
   font-size: 0.88rem;
   font-weight: 650;
-  color: #cbd5e1;
+  color: var(--bccr-muted);
 }
 
 .btn-ghost-line {
@@ -1060,7 +1529,7 @@ async function loadByCheckId() {
   padding: 0.85rem 1rem;
   border-radius: 0.55rem;
   font-size: 0.86rem;
-  color: #86efac;
+  color: var(--bccr-success-text);
   background: rgba(34, 197, 94, 0.08);
   border: 1px solid rgba(74, 222, 128, 0.2);
 }
@@ -1075,9 +1544,9 @@ async function loadByCheckId() {
 .sub-tab {
   padding: 0.42rem 0.85rem;
   border-radius: 0.5rem;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(30, 41, 59, 0.35);
-  color: var(--bccr-muted);
+  border: 1px solid var(--bccr-option-border);
+  background: var(--bccr-option-bg);
+  color: var(--bccr-option-text);
   font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
@@ -1088,21 +1557,23 @@ async function loadByCheckId() {
 }
 
 .sub-tab:hover {
-  color: #e2e8f0;
+  border-color: var(--bccr-option-hover-border);
+  background: var(--bccr-option-hover-bg);
+  color: var(--bccr-text);
 }
 
 .sub-tab.active {
-  border-color: rgba(167, 139, 250, 0.45);
-  background: rgba(139, 92, 246, 0.14);
-  color: #ddd6fe;
+  border-color: var(--bccr-option-active-border);
+  background: var(--bccr-option-active-bg);
+  color: var(--bccr-option-active-text);
 }
 
 .query-panel {
   padding: 1rem;
   margin-bottom: 1rem;
   border-radius: 0.75rem;
-  background: rgba(0, 0, 0, 0.18);
-  border: 1px solid rgba(148, 163, 184, 0.1);
+  background: var(--bccr-choice-surface-bg);
+  border: 1px solid var(--bccr-choice-surface-border);
 }
 
 .addr-chip {
@@ -1122,17 +1593,17 @@ async function loadByCheckId() {
 .addr-val {
   font-size: 0.78rem;
   word-break: break-all;
-  color: #cbd5e1;
+  color: var(--bccr-muted);
   padding: 0.45rem 0.55rem;
   border-radius: 0.4rem;
-  background: rgba(15, 23, 42, 0.65);
+  background: var(--bccr-card);
 }
 
 .inp {
   padding: 0.55rem 0.7rem;
   border-radius: 0.5rem;
   border: 1px solid var(--bccr-border);
-  background: rgba(15, 23, 42, 0.65);
+  background: var(--bccr-card);
   color: var(--bccr-text);
   font-size: 0.9rem;
 }
@@ -1143,6 +1614,39 @@ async function loadByCheckId() {
   box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.15);
 }
 
+/* 再查重：作品选择区与授权页共用 work-pick-combo.css；此处为查重页容器与输入焦点琥珀色 */
+.recheck-pick-shell {
+  padding: 1rem 1.1rem 1.05rem;
+  border-radius: 0.85rem;
+  border: 1px solid rgba(251, 191, 36, 0.18);
+  background: linear-gradient(
+    155deg,
+    rgba(245, 158, 11, 0.07) 0%,
+    var(--bccr-card) 48%,
+    rgba(99, 102, 241, 0.06) 100%
+  );
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.recheck-pick-hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--bccr-muted);
+}
+
+.bccr-work-pick-combo.recheck-work-pick-host .inp:focus {
+  outline: none;
+  border-color: rgba(251, 191, 36, 0.45);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.12);
+}
+
+.err-inline {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  color: var(--bccr-danger);
+}
+
 .btn-query {
   margin-top: 0.75rem;
   width: 100%;
@@ -1151,7 +1655,7 @@ async function loadByCheckId() {
   border: none;
   font-weight: 650;
   font-size: 0.88rem;
-  color: #f5f3ff;
+  color: var(--bccr-text);
   cursor: pointer;
   background: linear-gradient(135deg, rgba(124, 58, 237, 0.9), rgba(59, 130, 246, 0.85));
   box-shadow: 0 6px 22px rgba(91, 33, 182, 0.25);
@@ -1162,12 +1666,11 @@ async function loadByCheckId() {
   cursor: not-allowed;
 }
 
-/* —— 查重记录：紧凑表格式 + 限高滚动 —— */
 .records-panel {
   margin-top: 0.5rem;
   border-radius: 0.9rem;
-  border: 1px solid rgba(167, 139, 250, 0.14);
-  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid var(--bccr-choice-surface-border);
+  background: var(--bccr-choice-surface-bg);
   overflow: hidden;
 }
 
@@ -1178,14 +1681,14 @@ async function loadByCheckId() {
   justify-content: space-between;
   gap: 0.35rem 0.75rem;
   padding: 0.55rem 0.8rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-  background: rgba(0, 0, 0, 0.12);
+  border-bottom: 1px solid var(--bccr-choice-surface-border);
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .records-count {
   font-size: 0.8rem;
   font-weight: 700;
-  color: #e2e8f0;
+  color: var(--bccr-text);
 }
 
 .records-hint {
@@ -1194,8 +1697,10 @@ async function loadByCheckId() {
 }
 
 .records-scroll {
-  max-height: min(52vh, 440px);
-  overflow: auto;
+  max-height: min(52vh, 480px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 0.2rem;
   overscroll-behavior: contain;
 }
 
@@ -1210,9 +1715,9 @@ async function loadByCheckId() {
   margin: 0;
   padding: 0.65rem 0.75rem;
   border: none;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.06);
-  border-left: 3px solid rgba(167, 139, 250, 0.45);
-  background: rgba(30, 41, 59, 0.25);
+  border-bottom: 1px solid var(--bccr-choice-surface-border);
+  border-left: 3px solid var(--bccr-accent-border);
+  background: #ffffff;
   font: inherit;
   color: inherit;
   cursor: pointer;
@@ -1227,11 +1732,11 @@ async function loadByCheckId() {
 }
 
 .records-row:hover {
-  background: rgba(59, 130, 246, 0.08);
+  background: var(--bccr-option-hover-bg);
 }
 
 .records-row.tone-high {
-  border-left-color: #f87171;
+  border-left-color: var(--bccr-danger);
 }
 
 .records-row.tone-mid {
@@ -1243,11 +1748,11 @@ async function loadByCheckId() {
 }
 
 .records-row.tone-none {
-  border-left-color: rgba(148, 163, 184, 0.45);
+  border-left-color: var(--bccr-text-hint);
 }
 
 .records-row.tone-default {
-  border-left-color: rgba(167, 139, 250, 0.45);
+  border-left-color: var(--bccr-accent-border);
 }
 
 .records-row-top {
@@ -1267,7 +1772,7 @@ async function loadByCheckId() {
 .col-sim {
   font-size: 0.82rem;
   font-weight: 800;
-  color: #fcd34d;
+  color: var(--bccr-warning-text);
 }
 
 .lvl-chip {
@@ -1276,13 +1781,13 @@ async function loadByCheckId() {
   border-radius: 999px;
   font-size: 0.68rem;
   font-weight: 650;
-  background: rgba(139, 92, 246, 0.18);
-  color: #ddd6fe;
+  background: var(--bccr-option-active-bg);
+  color: var(--bccr-option-active-text);
 }
 
 .records-row-id {
   font-size: 0.72rem;
-  color: rgba(148, 163, 184, 0.92);
+  color: var(--bccr-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1291,13 +1796,13 @@ async function loadByCheckId() {
 .col-time {
   flex-shrink: 0;
   font-size: 0.7rem;
-  color: rgba(148, 163, 184, 0.95);
+  color: var(--bccr-label);
   white-space: nowrap;
 }
 
 .col-go {
   flex-shrink: 0;
-  color: rgba(148, 163, 184, 0.55);
+  color: var(--bccr-placeholder);
   font-size: 1.1rem;
   font-weight: 300;
   line-height: 1;
@@ -1322,7 +1827,7 @@ async function loadByCheckId() {
   height: 36px;
   border-radius: 0.35rem;
   object-fit: cover;
-  background: rgba(15, 23, 42, 0.65);
+  background: var(--bccr-card);
   border: 1px solid rgba(148, 163, 184, 0.12);
 }
 
@@ -1341,13 +1846,13 @@ async function loadByCheckId() {
   font-size: 0.65rem;
   font-weight: 800;
   letter-spacing: 0.06em;
-  color: rgba(148, 163, 184, 0.75);
+  color: var(--bccr-muted);
 }
 
 .rw-main {
   flex: 1;
   min-width: 0;
-  color: #e2e8f0;
+  color: var(--bccr-text);
   overflow: hidden;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1360,7 +1865,6 @@ async function loadByCheckId() {
   }
 }
 
-/* —— 详情弹层 —— */
 .rec-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1369,7 +1873,7 @@ async function loadByCheckId() {
   align-items: center;
   justify-content: center;
   padding: 1rem;
-  background: rgba(2, 6, 23, 0.72);
+  background: var(--bccr-overlay);
   backdrop-filter: blur(6px);
 }
 
@@ -1382,8 +1886,8 @@ async function loadByCheckId() {
   flex-direction: column;
   border-radius: 1rem;
   border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(15, 23, 42, 0.96);
-  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.45);
+  background: var(--bccr-surface-overlay);
+  box-shadow: 0 28px 80px var(--bccr-overlay);
 }
 
 .rec-modal-head {
@@ -1396,7 +1900,7 @@ async function loadByCheckId() {
 }
 
 .rec-modal-head.tone-high {
-  border-bottom-color: #f87171;
+  border-bottom-color: var(--bccr-danger);
 }
 
 .rec-modal-head.tone-mid {
@@ -1416,7 +1920,7 @@ async function loadByCheckId() {
   margin: 0 0 0.25rem;
   font-size: 1.08rem;
   font-weight: 750;
-  color: #f8fafc;
+  color: var(--bccr-text);
 }
 
 .rec-modal-sub {
@@ -1433,7 +1937,7 @@ async function loadByCheckId() {
   border: none;
   border-radius: 0.45rem;
   background: rgba(148, 163, 184, 0.12);
-  color: #cbd5e1;
+  color: var(--bccr-muted);
   font-size: 1.35rem;
   line-height: 1;
   cursor: pointer;
@@ -1441,7 +1945,7 @@ async function loadByCheckId() {
 
 .rec-modal-close:hover {
   background: rgba(248, 113, 113, 0.15);
-  color: #fecaca;
+  color: var(--bccr-danger);
 }
 
 .rec-modal-metrics {
@@ -1449,7 +1953,8 @@ async function loadByCheckId() {
   grid-template-columns: 1fr 1fr;
   gap: 0.55rem;
   padding: 0.85rem 1.1rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  border-bottom: 1px solid var(--bccr-choice-surface-border);
+  background: #ffffff;
 }
 
 .rec-metric.span {
@@ -1469,23 +1974,25 @@ async function loadByCheckId() {
 .rec-metric-v {
   font-size: 1.35rem;
   font-weight: 800;
-  color: #fcd34d;
+  color: var(--bccr-warning-text);
 }
 
 .rec-metric-v.lvl {
   font-size: 1rem;
-  color: #ddd6fe;
+  color: var(--bccr-option-active-text);
 }
 
 .rec-metric-v.norm {
   font-size: 0.86rem;
   font-weight: 600;
-  color: #e2e8f0;
+  color: var(--bccr-text);
 }
 
 .rec-compare {
   padding: 0.9rem 1.1rem 0.4rem;
   overflow-y: auto;
+  background: var(--bccr-panel-muted);
+  border-top: 1px solid var(--bccr-choice-surface-border);
 }
 
 .rec-compare-lead {
@@ -1515,21 +2022,20 @@ async function loadByCheckId() {
 .rec-wcard {
   padding: 0.85rem 0.9rem;
   border-radius: 0.75rem;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--bccr-choice-surface-border);
+  background: var(--bccr-choice-surface-bg);
+  box-shadow: var(--bccr-shadow-sm);
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
 }
 
 .rec-wcard--src {
-  border-color: rgba(59, 130, 246, 0.28);
-  background: linear-gradient(160deg, rgba(59, 130, 246, 0.1), rgba(15, 23, 42, 0.3));
+  border-left: 3px solid var(--bccr-accent);
 }
 
 .rec-wcard--tgt {
-  border-color: rgba(244, 114, 182, 0.28);
-  background: linear-gradient(160deg, rgba(244, 114, 182, 0.08), rgba(15, 23, 42, 0.3));
+  border-left: 3px solid #7c3aed;
 }
 
 .rec-wtag {
@@ -1537,38 +2043,38 @@ async function loadByCheckId() {
   font-weight: 800;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: rgba(186, 230, 253, 0.85);
+  color: var(--bccr-accent-text);
 }
 
 .rec-wcard--tgt .rec-wtag {
-  color: rgba(251, 207, 232, 0.9);
+  color: #6d28d9;
 }
 
 .rec-wtitle {
   margin: 0;
   font-size: 0.88rem;
   font-weight: 650;
-  color: #f1f5f9;
+  color: var(--bccr-text);
   line-height: 1.45;
 }
 
 .rec-wauthor {
   margin: 0;
   font-size: 0.74rem;
-  color: rgba(186, 230, 253, 0.75);
+  color: var(--bccr-text-secondary);
   word-break: break-all;
 }
 
 .rec-wcard--tgt .rec-wauthor {
-  color: rgba(251, 207, 232, 0.75);
+  color: var(--bccr-muted);
 }
 
 .rec-wpreview {
   position: relative;
   border-radius: 0.55rem;
   overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--bccr-choice-surface-border);
+  background: #ffffff;
   min-height: 4.5rem;
   display: flex;
   align-items: center;
@@ -1587,7 +2093,7 @@ async function loadByCheckId() {
   padding: 0.55rem 0.65rem;
   font-size: 0.72rem;
   line-height: 1.45;
-  color: #cbd5e1;
+  color: var(--bccr-muted);
   max-height: 120px;
   overflow: hidden;
   text-align: left;
@@ -1598,7 +2104,7 @@ async function loadByCheckId() {
 .rec-preview-skel {
   padding: 0.65rem 0.75rem;
   font-size: 0.72rem;
-  color: rgba(148, 163, 184, 0.75);
+  color: var(--bccr-muted);
 }
 
 .rec-preview-skel {
@@ -1613,7 +2119,11 @@ async function loadByCheckId() {
 
 .rec-wid {
   font-size: 0.74rem;
-  color: rgba(148, 163, 184, 0.95);
+  padding: 0.35rem 0.45rem;
+  border-radius: 0.4rem;
+  color: var(--bccr-text-secondary);
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--bccr-choice-surface-border);
   word-break: break-all;
 }
 
@@ -1621,16 +2131,19 @@ async function loadByCheckId() {
   margin-top: 0.25rem;
   padding: 0.48rem 0.65rem;
   border-radius: 0.5rem;
-  border: 1px solid rgba(96, 165, 250, 0.45);
-  background: rgba(59, 130, 246, 0.15);
-  color: #bfdbfe;
+  border: 1px solid var(--bccr-btn-info-border);
+  background: var(--bccr-btn-info-bg);
+  color: var(--bccr-btn-info-text);
   font-size: 0.8rem;
   font-weight: 650;
   cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
 }
 
 .rec-wbtn:hover:not(:disabled) {
-  background: rgba(59, 130, 246, 0.25);
+  background: var(--bccr-btn-info-hover);
 }
 
 .rec-wbtn:disabled {
@@ -1639,21 +2152,31 @@ async function loadByCheckId() {
 }
 
 .rec-wbtn--tgt {
-  border-color: rgba(244, 114, 182, 0.45);
-  background: rgba(219, 39, 119, 0.12);
-  color: #fbcfe8;
+  border-color: rgba(124, 58, 237, 0.32);
+  background: rgba(124, 58, 237, 0.08);
+  color: #6d28d9;
 }
 
 .rec-wbtn--tgt:hover:not(:disabled) {
-  background: rgba(219, 39, 119, 0.18);
+  background: rgba(124, 58, 237, 0.14);
 }
 
 .rec-vs {
   align-self: center;
-  font-size: 0.72rem;
+  flex-shrink: 0;
+  width: 2.1rem;
+  height: 2.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 0.68rem;
   font-weight: 800;
-  letter-spacing: 0.12em;
-  color: rgba(148, 163, 184, 0.55);
+  letter-spacing: 0.08em;
+  color: var(--bccr-muted);
+  background: #ffffff;
+  border: 1px solid var(--bccr-choice-surface-border);
+  box-shadow: var(--bccr-shadow-sm);
 }
 
 .rec-modal-foot {
@@ -1676,7 +2199,7 @@ async function loadByCheckId() {
 
 .rec-meta-v {
   margin: 0;
-  color: #cbd5e1;
+  color: var(--bccr-muted);
   word-break: break-all;
   font-size: 0.72rem;
 }
@@ -1684,12 +2207,16 @@ async function loadByCheckId() {
 .rec-modal-tip {
   margin: 0.55rem 0 0;
   font-size: 0.68rem;
-  color: rgba(148, 163, 184, 0.65);
+  color: var(--bccr-muted);
 }
 
 .records-empty {
   text-align: center;
   padding: 2rem 1rem;
+  margin-top: 0.5rem;
+  border-radius: 0.75rem;
+  border: 1px dashed var(--bccr-choice-surface-border);
+  background: var(--bccr-choice-surface-bg);
   color: var(--bccr-muted);
 }
 

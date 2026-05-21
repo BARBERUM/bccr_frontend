@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import * as userApi from '@/api/user'
 import { formatRoleLabels } from '@/lib/roles'
@@ -15,10 +15,141 @@ const successMsg = ref('')
 const avatarUrl = ref('')
 const avatarBust = ref(0)
 const fileInput = ref(/** @type {HTMLInputElement | null} */ (null))
+const fileCameraInput = ref(/** @type {HTMLInputElement | null} */ (null))
+const avatarUploadWrap = ref(/** @type {HTMLElement | null} */ (null))
+const avatarMenuOpen = ref(false)
 
 const nickname = ref('')
 const phone = ref('')
 const email = ref('')
+/** 上次保存成功后的邮箱快照，用于判断「是否变更」 */
+const emailBaseline = ref('')
+const emailCode = ref('')
+const sendingEmailCode = ref(false)
+const emailSendCooldown = ref(0)
+/** @type {ReturnType<typeof setInterval> | null} */
+let emailCooldownTimer = null
+
+function isValidEmail(s) {
+  const t = String(s ?? '').trim()
+  if (!t) return false
+  return /^[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}$/.test(t)
+}
+
+const emailChangedFromBaseline = computed(
+  () => email.value.trim() !== emailBaseline.value.trim(),
+)
+
+const canSendProfileEmailCode = computed(
+  () =>
+    emailChangedFromBaseline.value &&
+    isValidEmail(email.value) &&
+    emailSendCooldown.value === 0 &&
+    !sendingEmailCode.value,
+)
+
+const emailSendCodeLabel = computed(() => {
+  if (sendingEmailCode.value) return '发送中…'
+  if (emailSendCooldown.value > 0) return `${emailSendCooldown.value}s 后重发`
+  return '获取验证码'
+})
+
+function clearEmailCooldown() {
+  if (emailCooldownTimer) {
+    clearInterval(emailCooldownTimer)
+    emailCooldownTimer = null
+  }
+  emailSendCooldown.value = 0
+}
+
+function startEmailCooldown(seconds = 60) {
+  clearEmailCooldown()
+  emailSendCooldown.value = seconds
+  emailCooldownTimer = setInterval(() => {
+    emailSendCooldown.value -= 1
+    if (emailSendCooldown.value <= 0) clearEmailCooldown()
+  }, 1000)
+}
+
+function syncEmailBaselineFromForm() {
+  emailBaseline.value = email.value.trim()
+  emailCode.value = ''
+}
+
+async function sendProfileEmailCode() {
+  errorMsg.value = ''
+  successMsg.value = ''
+  const em = email.value.trim()
+  if (!emailChangedFromBaseline.value) {
+    errorMsg.value = '请先修改为新邮箱后再获取验证码'
+    return
+  }
+  if (!isValidEmail(em)) {
+    errorMsg.value = '请先填写格式正确的新邮箱'
+    return
+  }
+  sendingEmailCode.value = true
+  try {
+    await userApi.sendProfileEmailChangeCode(em)
+    startEmailCooldown(60)
+    successMsg.value = '验证码已发送至新邮箱，请查收（含垃圾箱）'
+    window.setTimeout(() => {
+      if (successMsg.value === '验证码已发送至新邮箱，请查收（含垃圾箱）') successMsg.value = ''
+    }, 4000)
+  } catch (e) {
+    const status = /** @type {any} */ (e)?.httpStatus
+    const msg = String(e?.message || '验证码发送失败，请稍后重试')
+    if (status === 404 || /not\s*found/i.test(msg)) {
+      errorMsg.value =
+        '发码接口未找到(404)。默认使用与注册相同的路径；请在 `.env.development` 检查 `VITE_PROXY_TARGET`，或设置 `VITE_PROFILE_EMAIL_CODE_PATH` / `VITE_REGISTER_EMAIL_CODE_PATH`。'
+    } else {
+      errorMsg.value = msg
+    }
+  } finally {
+    sendingEmailCode.value = false
+  }
+}
+
+watch(
+  () => email.value.trim(),
+  (v) => {
+    if (v === emailBaseline.value.trim()) emailCode.value = ''
+  },
+)
+
+onBeforeUnmount(() => {
+  clearEmailCooldown()
+  document.removeEventListener('pointerdown', onAvatarMenuOutside)
+})
+
+/** 移动端展示「拍照」，可走相机意图，减少系统大图选择面板 */
+const showAvatarCameraEntry = computed(() => {
+  if (typeof navigator === 'undefined' || !navigator.userAgent) return false
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+})
+
+function onAvatarMenuOutside(ev) {
+  const wrap = avatarUploadWrap.value
+  if (!wrap || !avatarMenuOpen.value) return
+  const t = /** @type {Node | null} */ (ev.target)
+  if (t && !wrap.contains(t)) avatarMenuOpen.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', onAvatarMenuOutside)
+})
+
+function toggleAvatarMenu() {
+  if (uploading.value) return
+  avatarMenuOpen.value = !avatarMenuOpen.value
+}
+
+async function openAvatarPicker(kind) {
+  avatarMenuOpen.value = false
+  await nextTick()
+  if (kind === 'camera') fileCameraInput.value?.click()
+  else fileInput.value?.click()
+}
 
 const readonlyAccount = computed(() => {
   const u = /** @type {Record<string, unknown>} */ (auth.user || {})
@@ -114,6 +245,7 @@ async function boot() {
     if (!auth.user) await auth.refreshUser()
     fillFormFromUser()
     await loadAvatar()
+    syncEmailBaselineFromForm()
   } finally {
     loading.value = false
   }
@@ -132,15 +264,38 @@ watch(
 async function onSaveProfile() {
   successMsg.value = ''
   errorMsg.value = ''
+  const em = email.value.trim()
+  const base = emailBaseline.value.trim()
+  if (em !== base) {
+    if (!em) {
+      errorMsg.value = '暂不支持在此处直接清空邮箱；请保留原邮箱或填写新邮箱并完成验证。'
+      return
+    }
+    if (!isValidEmail(em)) {
+      errorMsg.value = '新邮箱格式不正确'
+      return
+    }
+    const code = emailCode.value.trim()
+    if (code.length < 4 || code.length > 12) {
+      errorMsg.value = '修改邮箱需先点击「获取验证码」，并填写邮件中的验证码（通常 4～12 位）'
+      return
+    }
+  }
   saving.value = true
   try {
-    await userApi.updateProfile({
+    /** @type {{ nickname?: string, phone?: string, email?: string, emailCode?: string }} */
+    const payload = {
       nickname: nickname.value.trim() || undefined,
       phone: phone.value.trim() || undefined,
-      email: email.value.trim() || undefined,
-    })
+    }
+    if (em !== base) {
+      payload.email = em
+      payload.emailCode = emailCode.value.trim()
+    }
+    await userApi.updateProfile(payload)
     await auth.refreshUser()
     fillFormFromUser()
+    syncEmailBaselineFromForm()
     successMsg.value = '资料已保存'
   } catch (e) {
     errorMsg.value = e?.message || '保存失败'
@@ -149,15 +304,14 @@ async function onSaveProfile() {
   }
 }
 
-function triggerPickAvatar() {
-  fileInput.value?.click()
-}
-
 async function onAvatarChange(ev) {
   const input = /** @type {HTMLInputElement} */ (ev.target)
   const file = input.files?.[0]
+  if (!file) {
+    input.value = ''
+    return
+  }
   input.value = ''
-  if (!file) return
   if (!file.type.startsWith('image/')) {
     errorMsg.value = '请选择图片文件'
     return
@@ -175,6 +329,67 @@ async function onAvatarChange(ev) {
     errorMsg.value = e?.message || '头像上传失败'
   } finally {
     uploading.value = false
+    avatarMenuOpen.value = false
+  }
+}
+
+const pwdOld = ref('')
+const pwdNew = ref('')
+const pwdConfirm = ref('')
+const pwdSaving = ref(false)
+const pwdErr = ref('')
+const pwdOk = ref('')
+const pwdModalOpen = ref(false)
+
+function openPwdModal() {
+  pwdModalOpen.value = true
+  pwdErr.value = ''
+  pwdOk.value = ''
+}
+
+function closePwdModal() {
+  if (pwdSaving.value) return
+  pwdModalOpen.value = false
+  pwdOld.value = ''
+  pwdNew.value = ''
+  pwdConfirm.value = ''
+  pwdErr.value = ''
+  pwdOk.value = ''
+}
+
+async function onChangePassword() {
+  pwdErr.value = ''
+  pwdOk.value = ''
+  const old = pwdOld.value
+  const nw = pwdNew.value
+  const cf = pwdConfirm.value
+  if (!String(old).trim()) {
+    pwdErr.value = '请输入原密码'
+    return
+  }
+  if (nw.length < 6) {
+    pwdErr.value = '新密码至少 6 位'
+    return
+  }
+  if (nw !== cf) {
+    pwdErr.value = '两次输入的新密码不一致'
+    return
+  }
+  if (old === nw) {
+    pwdErr.value = '新密码不能与原密码相同'
+    return
+  }
+  pwdSaving.value = true
+  try {
+    await userApi.updatePassword({ oldPassword: old, newPassword: nw })
+    pwdOld.value = ''
+    pwdNew.value = ''
+    pwdConfirm.value = ''
+    pwdOk.value = '密码已更新，下次登录请使用新密码。'
+  } catch (e) {
+    pwdErr.value = e?.message || '修改失败'
+  } finally {
+    pwdSaving.value = false
   }
 }
 </script>
@@ -218,10 +433,19 @@ async function onAvatarChange(ev) {
               </div>
             </div>
 
+            <div ref="avatarUploadWrap" class="avatar-upload-wrap">
             <input
               ref="fileInput"
               type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif"
+              class="sr-only"
+              @change="onAvatarChange"
+            />
+            <input
+              ref="fileCameraInput"
+              type="file"
               accept="image/*"
+              capture="environment"
               class="sr-only"
               @change="onAvatarChange"
             />
@@ -229,19 +453,33 @@ async function onAvatarChange(ev) {
               type="button"
               class="btn-upload"
               :disabled="uploading"
-              @click="triggerPickAvatar"
+              @click.stop="toggleAvatarMenu"
             >
               <span class="btn-upload-ic" aria-hidden="true">✦</span>
               {{ uploading ? '上传中…' : '更换头像' }}
             </button>
+            <div
+              v-if="avatarMenuOpen"
+              class="avatar-source-pop"
+              role="menu"
+              aria-label="选择头像图片来源"
+              @click.stop
+            >
+              <button type="button" class="avatar-pop-item" role="menuitem" @click="openAvatarPicker('file')">
+                从相册 / 文件夹选择…
+              </button>
+              <button
+                v-if="showAvatarCameraEntry"
+                type="button"
+                class="avatar-pop-item"
+                role="menuitem"
+                @click="openAvatarPicker('camera')"
+              >
+                拍照
+              </button>
+            </div>
+            </div>
 
-            <details class="api-details">
-              <summary>接口说明</summary>
-              <p class="api-details-body">
-                头像上传 <code class="mono">POST /api/user/avatar</code>，字段
-                <code class="mono">file</code>
-              </p>
-            </details>
           </aside>
 
           <section class="form-card">
@@ -304,25 +542,112 @@ async function onAvatarChange(ev) {
                   autocomplete="email"
                 />
               </label>
+
+              <div v-if="emailChangedFromBaseline" class="email-verify-block span-2">
+                <p class="email-verify-hint">
+                  您已修改邮箱，需向<strong>新邮箱</strong>获取验证码并填写后再保存。
+                </p>
+                <div class="email-verify-row">
+                  <input
+                    v-model.trim="emailCode"
+                    type="text"
+                    inputmode="numeric"
+                    maxlength="12"
+                    class="field-inp email-code-inp"
+                    placeholder="邮箱验证码"
+                    autocomplete="one-time-code"
+                  />
+                  <button
+                    type="button"
+                    class="btn-email-code"
+                    :disabled="!canSendProfileEmailCode"
+                    @click="sendProfileEmailCode"
+                  >
+                    {{ emailSendCodeLabel }}
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div v-if="errorMsg" class="banner banner-err" role="alert">{{ errorMsg }}</div>
             <div v-if="successMsg" class="banner banner-ok">{{ successMsg }}</div>
 
-            <button type="button" class="btn-save" :disabled="saving" @click="onSaveProfile">
-              <span class="btn-save-inner">{{ saving ? '保存中…' : '保存资料' }}</span>
-            </button>
-
-            <details class="api-details api-details-foot">
-              <summary>保存接口</summary>
-              <p class="api-details-body">
-                <code class="mono">PUT /api/user/profile</code>
-                ，请求体含昵称、手机、邮箱等可写字段。
-              </p>
-            </details>
+            <div class="form-actions">
+              <button type="button" class="btn-save" :disabled="saving" @click="onSaveProfile">
+                <span class="btn-save-inner">{{ saving ? '保存中…' : '保存资料' }}</span>
+              </button>
+              <button type="button" class="btn-pwd-trigger" @click="openPwdModal">
+                修改登录密码
+              </button>
+            </div>
           </section>
         </div>
       </template>
+
+      <div
+        v-if="pwdModalOpen"
+        class="pwd-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pwd-modal-title"
+        @click.self="closePwdModal"
+      >
+        <div class="pwd-modal bccr-scroll-slim" @click.stop>
+          <div class="pwd-modal__head">
+            <h2 id="pwd-modal-title" class="pwd-modal__title">修改登录密码</h2>
+            <button type="button" class="pwd-modal__close" aria-label="关闭" @click="closePwdModal">
+              ×
+            </button>
+          </div>
+          <p class="pwd-modal__lead">
+            请填写当前密码与新密码。修改成功后请使用新密码登录；其他设备上的会话可能需重新登录。
+          </p>
+          <div class="pwd-modal__fields">
+            <label class="pwd-field">
+              <span class="pwd-field__lbl">当前密码</span>
+              <input
+                v-model="pwdOld"
+                type="password"
+                class="pwd-field__inp"
+                autocomplete="current-password"
+                placeholder="请输入原密码"
+              />
+            </label>
+            <label class="pwd-field">
+              <span class="pwd-field__lbl">新密码</span>
+              <input
+                v-model="pwdNew"
+                type="password"
+                class="pwd-field__inp"
+                autocomplete="new-password"
+                placeholder="至少 6 位"
+                minlength="6"
+              />
+            </label>
+            <label class="pwd-field">
+              <span class="pwd-field__lbl">确认新密码</span>
+              <input
+                v-model="pwdConfirm"
+                type="password"
+                class="pwd-field__inp"
+                autocomplete="new-password"
+                placeholder="再次输入新密码"
+                minlength="6"
+              />
+            </label>
+          </div>
+          <div v-if="pwdErr" class="banner banner-err pwd-modal__banner" role="alert">{{ pwdErr }}</div>
+          <div v-if="pwdOk" class="banner banner-ok pwd-modal__banner">{{ pwdOk }}</div>
+          <div class="pwd-modal__actions">
+            <button type="button" class="pwd-btn pwd-btn--ghost" :disabled="pwdSaving" @click="closePwdModal">
+              取消
+            </button>
+            <button type="button" class="pwd-btn pwd-btn--primary" :disabled="pwdSaving" @click="onChangePassword">
+              {{ pwdSaving ? '提交中…' : '确认修改' }}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -401,14 +726,45 @@ async function onAvatarChange(ev) {
   }
 }
 
+.form-actions {
+  margin-top: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  align-items: stretch;
+}
+
+.btn-pwd-trigger {
+  width: 100%;
+  padding: 0.62rem 1rem;
+  border-radius: 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: var(--bccr-card);
+  color: var(--bccr-muted);
+  font-size: 0.86rem;
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.btn-pwd-trigger:hover {
+  background: rgba(56, 189, 248, 0.1);
+  border-color: rgba(56, 189, 248, 0.35);
+  color: var(--bccr-accent-text);
+}
+
 .identity-card {
+  position: relative;
   padding: 1.35rem 1.25rem;
   border-radius: 1.05rem;
   border: 1px solid rgba(52, 211, 153, 0.18);
-  background: rgba(15, 23, 42, 0.52);
+  background: var(--bccr-card);
   box-shadow:
     0 0 0 1px rgba(16, 185, 129, 0.06),
-    0 18px 48px rgba(0, 0, 0, 0.22);
+    0 18px 48px var(--bccr-code-bg);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -435,8 +791,8 @@ async function onAvatarChange(ev) {
   height: 112px;
   border-radius: 50%;
   overflow: hidden;
-  background: rgba(15, 23, 42, 0.92);
-  border: 2px solid rgba(15, 23, 42, 0.95);
+  background: var(--bccr-nav-bg);
+  border: 2px solid var(--bccr-surface);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -451,14 +807,14 @@ async function onAvatarChange(ev) {
 .placeholder {
   font-size: 2.35rem;
   font-weight: 750;
-  color: rgba(148, 163, 184, 0.95);
+  color: var(--bccr-label);
 }
 
 .identity-name {
   margin: 0 0 0.25rem;
   font-size: 1.12rem;
   font-weight: 720;
-  color: #f8fafc;
+  color: var(--bccr-text);
   letter-spacing: -0.02em;
 }
 
@@ -485,22 +841,72 @@ async function onAvatarChange(ev) {
   border-radius: 999px;
   border: 1px solid rgba(52, 211, 153, 0.35);
   background: rgba(16, 185, 129, 0.12);
-  color: #a7f3d0;
+  color: var(--bccr-success-text);
+}
+
+.avatar-upload-wrap {
+  position: relative;
+  width: 100%;
+  max-width: 11rem;
+  margin-top: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.avatar-source-pop {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(100% + 0.4rem);
+  z-index: 8;
+  width: max-content;
+  min-width: 10.25rem;
+  max-width: min(13.5rem, 92vw);
+  padding: 0.3rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(56, 189, 248, 0.32);
+  background: var(--bccr-surface-overlay);
+  box-shadow:
+    0 0 0 1px var(--bccr-hover),
+    0 12px 32px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(10px);
+}
+
+.avatar-pop-item {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+  border: none;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--bccr-text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  line-height: 1.35;
+  transition: background 0.12s;
+}
+
+.avatar-pop-item:hover {
+  background: rgba(56, 189, 248, 0.12);
 }
 
 .btn-upload {
   width: 100%;
-  margin-top: 0.85rem;
+  margin-top: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.45rem;
-  padding: 0.58rem 1rem;
-  border-radius: 0.65rem;
+  gap: 0.4rem;
+  padding: 0.48rem 0.75rem;
+  border-radius: 0.6rem;
   border: 1px solid rgba(56, 189, 248, 0.38);
   background: linear-gradient(135deg, rgba(14, 165, 233, 0.18), rgba(59, 130, 246, 0.12));
-  color: #bae6fd;
-  font-size: 0.88rem;
+  color: var(--bccr-accent-text);
+  font-size: 0.82rem;
   font-weight: 650;
   cursor: pointer;
   transition:
@@ -528,8 +934,8 @@ async function onAvatarChange(ev) {
   padding: 1.35rem 1.45rem;
   border-radius: 1.05rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(15, 23, 42, 0.48);
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
+  background: var(--bccr-card);
+  box-shadow: 0 20px 50px var(--bccr-hover);
 }
 
 .form-card-head {
@@ -540,7 +946,7 @@ async function onAvatarChange(ev) {
   margin: 0 0 0.35rem;
   font-size: 1.02rem;
   font-weight: 680;
-  color: #f1f5f9;
+  color: var(--bccr-text);
 }
 
 .form-card-desc {
@@ -554,14 +960,14 @@ async function onAvatarChange(ev) {
   padding: 0.72rem 0.85rem;
   border-radius: 0.65rem;
   border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--bccr-hover);
   margin-bottom: 0.65rem;
 }
 
 .chain-block {
   margin-bottom: 1rem;
   border-color: rgba(52, 211, 153, 0.15);
-  background: linear-gradient(125deg, rgba(16, 185, 129, 0.06), rgba(15, 23, 42, 0.35));
+  background: linear-gradient(125deg, rgba(16, 185, 129, 0.06), var(--bccr-surface-muted));
 }
 
 .chain-head {
@@ -577,7 +983,7 @@ async function onAvatarChange(ev) {
   font-weight: 650;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: rgba(148, 163, 184, 0.92);
+  color: var(--bccr-text-secondary);
   margin-bottom: 0.35rem;
 }
 
@@ -587,14 +993,14 @@ async function onAvatarChange(ev) {
 
 .readonly-value {
   font-size: 0.92rem;
-  color: #e2e8f0;
+  color: var(--bccr-text);
   word-break: break-all;
 }
 
 .chain-value {
   margin: 0.45rem 0 0;
   font-size: 0.84rem;
-  color: #d1fae5;
+  color: var(--bccr-success-text);
   word-break: break-all;
 }
 
@@ -610,7 +1016,7 @@ async function onAvatarChange(ev) {
   border-radius: 0.4rem;
   border: 1px solid rgba(52, 211, 153, 0.35);
   background: rgba(16, 185, 129, 0.12);
-  color: #a7f3d0;
+  color: var(--bccr-success-text);
   font-size: 0.72rem;
   font-weight: 650;
   cursor: pointer;
@@ -634,6 +1040,10 @@ async function onAvatarChange(ev) {
   .field.span-2 {
     grid-column: auto;
   }
+
+  .email-verify-block.span-2 {
+    grid-column: auto;
+  }
 }
 
 .field {
@@ -646,17 +1056,72 @@ async function onAvatarChange(ev) {
   grid-column: 1 / -1;
 }
 
+.email-verify-block.span-2 {
+  grid-column: 1 / -1;
+}
+
+.email-verify-hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: rgba(251, 191, 36, 0.92);
+}
+
+.email-verify-hint strong {
+  color: var(--bccr-warning-text);
+  font-weight: 700;
+}
+
+.email-verify-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.email-code-inp {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+.btn-email-code {
+  flex-shrink: 0;
+  padding: 0.58rem 0.95rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  background: rgba(14, 165, 233, 0.15);
+  color: var(--bccr-accent-text);
+  font-size: 0.82rem;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    opacity 0.12s;
+}
+
+.btn-email-code:hover:not(:disabled) {
+  background: rgba(14, 165, 233, 0.26);
+  border-color: rgba(125, 211, 252, 0.55);
+}
+
+.btn-email-code:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .field-lbl {
   font-size: 0.74rem;
   font-weight: 600;
-  color: rgba(148, 163, 184, 0.95);
+  color: var(--bccr-label);
 }
 
 .field-inp {
   padding: 0.58rem 0.78rem;
   border-radius: 0.55rem;
   border: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(15, 23, 42, 0.72);
+  background: var(--bccr-card);
   color: var(--bccr-text);
   font-size: 0.9rem;
   outline: none;
@@ -681,18 +1146,18 @@ async function onAvatarChange(ev) {
 .banner-err {
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(248, 113, 113, 0.28);
-  color: #fecaca;
+  color: var(--bccr-danger);
 }
 
 .banner-ok {
   background: rgba(34, 197, 94, 0.1);
   border: 1px solid rgba(74, 222, 128, 0.28);
-  color: #bbf7d0;
+  color: var(--bccr-success-text);
 }
 
 .btn-save {
   width: 100%;
-  margin-top: 1.1rem;
+  margin-top: 0;
   padding: 0;
   border: none;
   border-radius: 0.68rem;
@@ -721,30 +1186,164 @@ async function onAvatarChange(ev) {
   padding: 0.78rem 1rem;
   font-size: 0.93rem;
   font-weight: 700;
-  color: #f8fafc;
+  color: var(--bccr-text);
 }
 
-.api-details {
-  margin-top: 1rem;
+.pwd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 0));
+  box-sizing: border-box;
+  background: rgba(12, 18, 34, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.pwd-modal {
   width: 100%;
-  font-size: 0.76rem;
+  max-width: 420px;
+  max-height: min(90vh, 560px);
+  overflow: auto;
+  padding: 1.25rem 1.35rem 1.2rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  background: var(--bccr-surface);
+  box-shadow: 0 24px 64px var(--bccr-overlay);
+}
+
+.pwd-modal__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.pwd-modal__title {
+  margin: 0;
+  font-size: 1.12rem;
+  font-weight: 750;
+  color: var(--bccr-accent-text);
+  letter-spacing: -0.02em;
+}
+
+.pwd-modal__close {
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  margin: -0.25rem -0.35rem 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 0.45rem;
+  background: transparent;
   color: var(--bccr-muted);
-  text-align: left;
-}
-
-.api-details-foot {
-  margin-top: 0.85rem;
-}
-
-.api-details summary {
+  font-size: 1.35rem;
+  line-height: 1;
   cursor: pointer;
-  color: rgba(148, 163, 184, 0.95);
-  font-weight: 500;
+  transition:
+    background 0.12s,
+    color 0.12s;
 }
 
-.api-details-body {
-  margin: 0.45rem 0 0;
+.pwd-modal__close:hover {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--bccr-text);
+}
+
+.pwd-modal__lead {
+  margin: 0 0 1rem;
+  font-size: 0.8rem;
   line-height: 1.55;
+  color: var(--bccr-muted);
+}
+
+.pwd-modal__fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.pwd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+}
+
+.pwd-field__lbl {
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: var(--bccr-muted);
+  letter-spacing: 0.03em;
+}
+
+.pwd-field__inp {
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: var(--bccr-code-bg);
+  color: var(--bccr-text);
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+.pwd-field__inp:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.12);
+}
+
+.pwd-modal__banner {
+  margin-top: 0.75rem;
+}
+
+.pwd-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.1rem;
+  flex-wrap: wrap;
+}
+
+.pwd-btn {
+  padding: 0.48rem 1.1rem;
+  border-radius: 0.5rem;
+  font-size: 0.86rem;
+  font-weight: 650;
+  cursor: pointer;
+  border: none;
+  transition:
+    opacity 0.12s,
+    filter 0.12s;
+}
+
+.pwd-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pwd-btn--ghost {
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: transparent;
+  color: var(--bccr-muted);
+}
+
+.pwd-btn--ghost:hover:not(:disabled) {
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--bccr-text);
+}
+
+.pwd-btn--primary {
+  background: linear-gradient(135deg, #0ea5e9, #6366f1);
+  color: var(--bccr-text);
+  box-shadow: 0 6px 20px rgba(99, 102, 241, 0.25);
+}
+
+.pwd-btn--primary:hover:not(:disabled) {
+  filter: brightness(1.05);
 }
 
 .mono {
@@ -759,7 +1358,7 @@ async function onAvatarChange(ev) {
   padding: 1.35rem;
   border-radius: 1.05rem;
   border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(15, 23, 42, 0.4);
+  background: var(--bccr-surface-muted);
 }
 
 @media (max-width: 640px) {

@@ -90,3 +90,126 @@ export function isSameUser(me, row) {
   const rid = String(row.id ?? row.userId ?? '').trim()
   return Boolean(mid && rid && mid === rid)
 }
+
+/**
+ * @param {Record<string, unknown>} row
+ * @param {string[]} keys
+ */
+function pickFirstStringField(row, keys) {
+  if (!row || typeof row !== 'object') return ''
+  const o = /** @type {Record<string, unknown>} */ (row)
+  for (const k of keys) {
+    const v = o[k]
+    if (v == null) continue
+    const s = String(v).trim()
+    if (s !== '') return s
+  }
+  return ''
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @param {string[]} keys
+ * @returns {unknown}
+ */
+function pickFirstScalar(row, keys) {
+  if (!row || typeof row !== 'object') return undefined
+  const o = /** @type {Record<string, unknown>} */ (row)
+  for (const k of keys) {
+    const v = o[k]
+    if (v == null) continue
+    if (typeof v === 'number' && !Number.isNaN(v)) return v
+    if (typeof v === 'string' && v.trim() !== '') return v
+  }
+  return undefined
+}
+
+/** 列表展示用用户主键（优先数值 id） */
+export function pickAdminUserIdDisplay(row) {
+  return pickFirstStringField(row, ['id', 'userId', 'uid'])
+}
+
+export function pickUserEmail(row) {
+  return pickFirstStringField(row, ['email', 'mail', 'userEmail', 'user_mail'])
+}
+
+export function pickRegisterIp(row) {
+  return pickFirstStringField(row, [
+    'registerIp',
+    'regIp',
+    'registrationIp',
+    'signupIp',
+    'register_ip',
+    'reg_ip',
+    'createdFromIp',
+    'createIp',
+    'registerFromIp',
+    'registerClientIp',
+    'signup_ip',
+  ])
+}
+
+/** 最近一次登录 IP */
+export function pickLoginIp(row) {
+  return pickFirstStringField(row, [
+    'lastLoginIp',
+    'loginIp',
+    'lastIp',
+    'last_login_ip',
+    'recentLoginIp',
+    'lastLoginIP',
+    'login_ip',
+    'lastLoginClientIp',
+  ])
+}
+
+/** 原始值供格式化（支持时间戳毫秒/秒） */
+export function pickLastLoginAtRaw(row) {
+  const v = pickFirstScalar(row, [
+    'lastLoginTime',
+    'lastLoginAt',
+    'lastLogin',
+    'lastActiveTime',
+    'last_access_time',
+    'last_login_time',
+    'lastAccessTime',
+    'recentLoginTime',
+  ])
+  return v
+}
+
+export function pickRegisterAtRaw(row) {
+  const v = pickFirstScalar(row, [
+    'createTime',
+    'createdAt',
+    'gmtCreate',
+    'registerTime',
+    'registrationTime',
+    'joinTime',
+    'registeredAt',
+    'create_time',
+    'gmt_created',
+  ])
+  return v
+}
+
+/**
+ * @param {unknown} v
+ * @returns {string}
+ */
+export function formatAdminListDateTime(v) {
+  if (v == null || v === '') return '—'
+  if (typeof v === 'number') {
+    let ms = v
+    if (v > 0 && v < 1e12) ms = v * 1000
+    const d = new Date(ms)
+    return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false })
+  }
+  const s = String(v).trim()
+  if (!s) return '—'
+  const d = new Date(s)
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleString('zh-CN', { hour12: false })
+  }
+  return s
+}

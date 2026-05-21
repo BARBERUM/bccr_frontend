@@ -1,21 +1,26 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { normalizeMediaSrc } from '@/api/client'
 import * as adminUsersApi from '@/api/adminUsers'
 import {
+  formatAdminListDateTime,
   formatUserEnabled,
   isSameUser,
+  pickAdminUserIdDisplay,
   pickAdminUserKey,
+  pickLoginIp,
+  pickLastLoginAtRaw,
   pickNickname,
+  pickRegisterAtRaw,
+  pickRegisterIp,
+  pickUserEmail,
   pickUsername,
   userRowRoleCodes,
 } from '@/lib/adminUserDisplay'
-import { formatRoleLabels } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 
-/** 可分配的系统角色（与后端约定小写码一致） */
 const MANAGEABLE_ROLES = [
   { code: 'admin', label: '超级管理员' },
   { code: 'auditor', label: '审核员' },
@@ -23,8 +28,16 @@ const MANAGEABLE_ROLES = [
   { code: 'agent', label: '版权代理' },
 ]
 
-const keywordInput = ref('')
-const keywordActive = ref('')
+const filterUserIdInput = ref('')
+const filterUsernameInput = ref('')
+const filterStartDateInput = ref('')
+const filterEndDateInput = ref('')
+
+const filterUserIdActive = ref('')
+const filterUsernameActive = ref('')
+const filterStartTimeActive = ref('')
+const filterEndTimeActive = ref('')
+
 const page = ref(1)
 const size = ref(10)
 
@@ -39,8 +52,70 @@ const pages = ref(0)
 const selected = ref(null)
 const detailLoading = ref(false)
 
-/** `userKey:action` 例如 `12:status`、`jack:grant:auditor` */
 const pending = ref('')
+
+/** 居中二次确认弹窗（停用/启用/删除/收回角色） */
+const confirmOpen = ref(false)
+const confirmTitle = ref('')
+const confirmBody = ref('')
+/** @type {import('vue').Ref<'neutral' | 'warning' | 'danger'>} */
+const confirmVariant = ref('neutral')
+/** @type {import('vue').Ref<'status' | 'delete' | 'revoke' | null>} */
+const confirmKind = ref(null)
+/** @type {import('vue').Ref<Record<string, unknown> | null>} */
+const confirmRow = ref(null)
+const confirmRole = ref('')
+
+/**
+ * @param {{
+ *   kind: 'status' | 'delete' | 'revoke',
+ *   row: Record<string, unknown>,
+ *   title: string,
+ *   body: string,
+ *   variant?: 'neutral' | 'warning' | 'danger',
+ *   role?: string,
+ * }} opts
+ */
+function openConfirmDialog(opts) {
+  confirmKind.value = opts.kind
+  confirmRow.value = opts.row
+  confirmTitle.value = opts.title
+  confirmBody.value = opts.body
+  confirmVariant.value = opts.variant ?? 'neutral'
+  confirmRole.value = opts.role ?? ''
+  confirmOpen.value = true
+}
+
+function closeConfirmDialog() {
+  confirmOpen.value = false
+  confirmKind.value = null
+  confirmRow.value = null
+  confirmRole.value = ''
+  confirmTitle.value = ''
+  confirmBody.value = ''
+}
+
+async function executeConfirm() {
+  const row = confirmRow.value
+  const kind = confirmKind.value
+  const role = confirmRole.value
+  if (!row || !kind) {
+    closeConfirmDialog()
+    return
+  }
+  confirmOpen.value = false
+  const k = kind
+  const r = row
+  const rl = role
+  confirmKind.value = null
+  confirmRow.value = null
+  confirmRole.value = ''
+  confirmTitle.value = ''
+  confirmBody.value = ''
+  if (k === 'status') await doToggleEnabled(r)
+  else if (k === 'delete') await doRemoveUser(r)
+  else if (k === 'revoke') await doRevokeRole(r, rl)
+}
 
 const pageTotalLabel = computed(() => {
   if (!total.value) return '暂无数据'
@@ -82,17 +157,89 @@ function isSelf(row) {
   return isSameUser(auth.user, row)
 }
 
+/** 对列表中未带回角色字段的行并行拉取 GET …/roles，保证列表可就地分配 */
+async function hydrateListRoles(rows) {
+  const need = rows.filter((row) => {
+    const key = pickAdminUserKey(row)
+    if (!key) return false
+    return userRowRoleCodes(row).length === 0
+  })
+  if (!need.length) return rows
+  const fetched = await Promise.all(
+    need.map(async (row) => {
+      const key = pickAdminUserKey(row)
+      try {
+        const data = await adminUsersApi.fetchUserRoles(key)
+        return { key, roles: adminUsersApi.normalizeRolesList(data) }
+      } catch {
+        return { key, roles: row.roles }
+      }
+    }),
+  )
+  const byKey = new Map(fetched.map((x) => [x.key, x.roles]))
+  return rows.map((row) => {
+    const key = pickAdminUserKey(row)
+    if (!key || !byKey.has(key)) return row
+    return { ...row, roles: byKey.get(key) }
+  })
+}
+
+/**
+ * 后端若忽略 userId / username 查询仍返回整页用户时，在本页收窄：用户 ID 精确匹配，用户名模糊（包含子串）。
+ * @param {{ records: Record<string, unknown>[], total: number, page: number, size: number, pages: number }} norm
+ */
+function applyClientQueryGuards(norm) {
+  const uid = filterUserIdActive.value.trim()
+  const uname = filterUsernameActive.value.trim().toLowerCase()
+  if (!uid && !uname) return norm
+
+  const raw = norm.records
+  let records = raw
+  if (uid) {
+    records = records.filter((r) => {
+      const id = String(pickAdminUserIdDisplay(r) ?? r.id ?? r.userId ?? r.uid ?? '').trim()
+      return id === uid
+    })
+  }
+  if (uname) {
+    records = records.filter((r) => pickUsername(r).toLowerCase().includes(uname))
+  }
+
+  if (records.length === raw.length) return norm
+
+  const t = records.length
+  if (t === 0 && raw.length > 0) {
+    listError.value =
+      '未找到符合条件的用户（用户名为包含匹配、用户 ID 为精确匹配）。服务端返回了未过滤列表时，已在本页收窄；请核对 /api/user/list 的 userId、username。'
+  } else {
+    listError.value =
+      '提示：服务端返回的列表未完全按筛选过滤，已在本页按用户名模糊、用户 ID 精确校正；仍建议修复后端 list 接口。'
+  }
+
+  return {
+    ...norm,
+    records,
+    total: t,
+    page: 1,
+    pages: t > 0 ? 1 : 0,
+    size: norm.size,
+  }
+}
+
 async function loadList() {
   listLoading.value = true
   listError.value = ''
   try {
     const data = await adminUsersApi.fetchAdminUserList({
-      page: page.value,
-      size: size.value,
-      keyword: keywordActive.value,
+      pageNum: page.value,
+      pageSize: size.value,
+      userId: filterUserIdActive.value || undefined,
+      username: filterUsernameActive.value || undefined,
+      startTime: filterStartTimeActive.value || undefined,
+      endTime: filterEndTimeActive.value || undefined,
     })
-    const norm = adminUsersApi.normalizeAdminUserPage(data)
-    records.value = norm.records
+    const norm = applyClientQueryGuards(adminUsersApi.normalizeAdminUserPage(data))
+    records.value = await hydrateListRoles(norm.records)
     total.value = norm.total
     pages.value = norm.pages
     size.value = norm.size
@@ -109,7 +256,7 @@ async function loadList() {
       }
     }
   } catch (e) {
-    listError.value = e?.message || '加载用户列表失败（请确认管理员已登录且 GET /api/user/list 可用）'
+    listError.value = e?.message || '加载用户列表失败，请确认已使用管理员账号登录。'
     records.value = []
     total.value = 0
     pages.value = 0
@@ -118,8 +265,38 @@ async function loadList() {
   }
 }
 
-function applySearch() {
-  keywordActive.value = keywordInput.value.trim()
+async function applySearch() {
+  const s = filterStartDateInput.value.trim()
+  const e = filterEndDateInput.value.trim()
+  if (s && e && s > e) {
+    listError.value = '注册起始日期不能晚于结束日期'
+    return
+  }
+  listError.value = ''
+  filterUserIdActive.value = filterUserIdInput.value.trim()
+  filterUsernameActive.value = filterUsernameInput.value.trim()
+  filterStartTimeActive.value = s
+  filterEndTimeActive.value = e
+  page.value = 1
+  await nextTick()
+  await loadList()
+}
+
+function resetFilters() {
+  filterUserIdInput.value = ''
+  filterUsernameInput.value = ''
+  filterStartDateInput.value = ''
+  filterEndDateInput.value = ''
+  filterUserIdActive.value = ''
+  filterUsernameActive.value = ''
+  filterStartTimeActive.value = ''
+  filterEndTimeActive.value = ''
+  listError.value = ''
+  page.value = 1
+  loadList()
+}
+
+function onPageSizeChange() {
   page.value = 1
   loadList()
 }
@@ -149,7 +326,10 @@ async function refreshDetail(row) {
   try {
     const data = await adminUsersApi.fetchUserRoles(key)
     const roles = adminUsersApi.normalizeRolesList(data)
-    selected.value = { ...row, roles }
+    const merged = { ...row, roles }
+    selected.value = merged
+    const idx = records.value.findIndex((r) => pickAdminUserKey(r) === key)
+    if (idx >= 0) records.value.splice(idx, 1, merged)
   } catch {
     selected.value = { ...row }
   } finally {
@@ -158,16 +338,11 @@ async function refreshDetail(row) {
 }
 
 /** @param {Record<string, unknown>} row */
-async function toggleEnabled(row) {
+async function doToggleEnabled(row) {
   const key = pickAdminUserKey(row)
   if (!key) return
   const st = formatUserEnabled(row)
   const next = !st.enabled
-  if (isSelf(row) && !next) {
-    if (!window.confirm('即将停用当前登录账号，确定继续？')) return
-  } else if (!next) {
-    if (!window.confirm(`确定停用用户「${pickUsername(row) || key}」？`)) return
-  } else if (!window.confirm(`确定重新启用用户「${pickUsername(row) || key}」？`)) return
   setPending(key, 'status')
   listError.value = ''
   try {
@@ -179,6 +354,32 @@ async function toggleEnabled(row) {
   } finally {
     clearPending()
   }
+}
+
+/** @param {Record<string, unknown>} row */
+async function toggleEnabled(row) {
+  const key = pickAdminUserKey(row)
+  if (!key) return
+  const st = formatUserEnabled(row)
+  const next = !st.enabled
+  let title = ''
+  let body = ''
+  /** @type {'neutral' | 'warning'} */
+  let variant = 'neutral'
+  if (isSelf(row) && !next) {
+    title = '停用当前账号'
+    body = '即将停用当前登录账号，之后将无法以此账号登录，确定继续？'
+    variant = 'warning'
+  } else if (!next) {
+    title = '停用账号'
+    body = `确定停用用户「${pickUsername(row) || key}」？`
+    variant = 'warning'
+  } else {
+    title = '启用账号'
+    body = `确定重新启用用户「${pickUsername(row) || key}」？`
+    variant = 'neutral'
+  }
+  openConfirmDialog({ kind: 'status', row, title, body, variant })
 }
 
 /** @param {Record<string, unknown>} row */
@@ -202,15 +403,9 @@ async function grantRole(row, role) {
 
 /** @param {Record<string, unknown>} row */
 /** @param {string} role */
-async function revokeRole(row, role) {
+async function doRevokeRole(row, role) {
   const key = pickAdminUserKey(row)
   if (!key) return
-  const rl = role.toLowerCase()
-  if (isSelf(row) && rl === 'admin') {
-    listError.value = '不能收回自己的超级管理员角色'
-    return
-  }
-  if (!window.confirm(`确定收回角色「${roleLabel(rl)}」？`)) return
   setPending(key, `revoke:${role}`)
   listError.value = ''
   try {
@@ -221,6 +416,26 @@ async function revokeRole(row, role) {
   } finally {
     clearPending()
   }
+}
+
+/** @param {Record<string, unknown>} row */
+/** @param {string} role */
+async function revokeRole(row, role) {
+  const key = pickAdminUserKey(row)
+  if (!key) return
+  const rl = role.toLowerCase()
+  if (isSelf(row) && rl === 'admin') {
+    listError.value = '不能收回自己的超级管理员角色'
+    return
+  }
+  openConfirmDialog({
+    kind: 'revoke',
+    row,
+    role,
+    title: '收回角色',
+    body: `确定收回角色「${roleLabel(rl)}」？`,
+    variant: 'warning',
+  })
 }
 
 /** @param {string} code */
@@ -236,21 +451,9 @@ function rowHasRole(row, code) {
 }
 
 /** @param {Record<string, unknown>} row */
-function roleSummary(row) {
-  const labels = formatRoleLabels(row)
-  return labels.length ? labels.join(' · ') : '未加载或未分配角色'
-}
-
-/** @param {Record<string, unknown>} row */
-async function removeUser(row) {
+async function doRemoveUser(row) {
   const key = pickAdminUserKey(row)
   if (!key) return
-  if (isSelf(row)) {
-    listError.value = '不能删除当前登录账号'
-    return
-  }
-  const name = pickUsername(row) || key
-  if (!window.confirm(`确定永久删除用户「${name}」？该操作不可撤销（DELETE /api/user/{userId}）。`)) return
   setPending(key, 'delete')
   listError.value = ''
   try {
@@ -266,21 +469,46 @@ async function removeUser(row) {
   }
 }
 
+/** @param {Record<string, unknown>} row */
+async function removeUser(row) {
+  const key = pickAdminUserKey(row)
+  if (!key) return
+  if (isSelf(row)) {
+    listError.value = '不能删除当前登录账号'
+    return
+  }
+  const name = pickUsername(row) || key
+  openConfirmDialog({
+    kind: 'delete',
+    row,
+    title: '删除用户',
+    body: `确定永久删除用户「${name}」？该操作不可撤销。`,
+    variant: 'danger',
+  })
+}
+
+function onConfirmEscape(e) {
+  if (e.key === 'Escape' && confirmOpen.value) closeConfirmDialog()
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onConfirmEscape)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onConfirmEscape)
+})
+
 loadList()
 </script>
 
 <template>
   <div class="um-shell">
     <div class="um-page">
-      <header class="hero">
-        <div class="hero-bloom" aria-hidden="true" />
+      <header class="hero hero-compact">
         <h1 class="title">用户管理</h1>
         <p class="lead">
-          对接
-          <code class="mono">UserController</code>
-          ：分页列表
-          <code class="mono">GET /api/user/list</code>
-          ，启用/禁用、角色查询与变更、删除用户等（均需管理员角色）。
+          支持按用户 ID、用户名（模糊）、注册日期区间筛选；与接口 pageNum、pageSize 对齐。行内改角色，点选后在侧栏启停或删除。
         </p>
       </header>
 
@@ -288,24 +516,59 @@ loadList()
 
       <div class="um-layout">
         <section class="panel list-panel">
-          <div class="toolbar">
-            <div class="search-row">
-              <input
-                v-model.trim="keywordInput"
-                type="search"
-                class="inp-search"
-                placeholder="用户名 / 昵称关键字"
-                autocomplete="off"
-                @keydown.enter.prevent="applySearch"
-              />
-              <button type="button" class="btn-accent" :disabled="listLoading" @click="applySearch">
-                {{ listLoading ? '查询中…' : '搜索' }}
-              </button>
-              <button type="button" class="btn-ghost" :disabled="listLoading" @click="loadList">
-                刷新
-              </button>
+          <div class="toolbar toolbar-compact filter-toolbar">
+            <div class="filter-grid">
+              <label class="ff">
+                <span class="ff-l">用户 ID</span>
+                <input
+                  v-model.trim="filterUserIdInput"
+                  type="text"
+                  class="ff-inp"
+                  placeholder="精确匹配"
+                  autocomplete="off"
+                  @keydown.enter.prevent="applySearch"
+                />
+              </label>
+              <label class="ff">
+                <span class="ff-l">用户名</span>
+                <input
+                  v-model.trim="filterUsernameInput"
+                  type="search"
+                  class="ff-inp"
+                  placeholder="模糊匹配"
+                  autocomplete="off"
+                  @keydown.enter.prevent="applySearch"
+                />
+              </label>
+              <label class="ff">
+                <span class="ff-l">注册 ≥</span>
+                <input v-model="filterStartDateInput" type="date" class="ff-inp" />
+              </label>
+              <label class="ff">
+                <span class="ff-l">注册 ≤</span>
+                <input v-model="filterEndDateInput" type="date" class="ff-inp" />
+              </label>
+              <label class="ff ff-size">
+                <span class="ff-l">每页条数</span>
+                <select v-model.number="size" class="ff-inp ff-select" @change="onPageSizeChange">
+                  <option :value="10">10</option>
+                  <option :value="20">20</option>
+                  <option :value="50">50</option>
+                </select>
+              </label>
+              <div class="filter-actions">
+                <button type="button" class="btn-accent" :disabled="listLoading" @click="applySearch">
+                  {{ listLoading ? '…' : '查询' }}
+                </button>
+                <button type="button" class="btn-ghost" :disabled="listLoading" @click="resetFilters">
+                  重置
+                </button>
+                <button type="button" class="btn-ghost" :disabled="listLoading" @click="loadList">
+                  刷新
+                </button>
+                <span class="toolbar-meta-inline">{{ pageTotalLabel }}</span>
+              </div>
             </div>
-            <p class="toolbar-meta">{{ pageTotalLabel }}</p>
           </div>
 
           <div v-if="listLoading && !records.length" class="empty">
@@ -313,7 +576,7 @@ loadList()
             加载用户列表…
           </div>
           <div v-else-if="!records.length" class="empty muted">
-            暂无用户数据；可调整关键字或检查后端分页返回字段是否为 records / list。
+            暂无用户数据，请调整筛选条件或点击重置后重试。
           </div>
           <ul v-else class="user-list">
             <li
@@ -327,20 +590,90 @@ loadList()
                 <img v-if="rowAvatarUrl(row)" :src="rowAvatarUrl(row)" alt="" class="uc-img" />
                 <span v-else class="uc-ph">{{ rowInitial(row) }}</span>
               </div>
-              <div class="uc-body">
-                <div class="uc-top">
-                  <span class="uc-name">{{ pickUsername(row) || '—' }}</span>
-                  <span
-                    class="uc-status"
-                    :class="`tone-${formatUserEnabled(row).tone}`"
+              <div class="uc-row-wrap">
+                <div class="uc-row">
+                  <div class="uc-core">
+                    <span class="uc-name">{{ pickUsername(row) || '—' }}</span>
+                    <span
+                      class="uc-status"
+                      :class="`tone-${formatUserEnabled(row).tone}`"
+                    >
+                      {{ formatUserEnabled(row).label }}
+                    </span>
+                    <span class="uc-nick uc-clip" :title="pickNickname(row) || undefined">{{
+                      pickNickname(row) || '—'
+                    }}</span>
+                  </div>
+                  <div
+                    class="uc-cell"
+                    :title="pickAdminUserIdDisplay(row) || pickAdminUserKey(row) || undefined"
                   >
-                    {{ formatUserEnabled(row).label }}
-                  </span>
+                    <span class="uc-l">用户 ID</span>
+                    <span class="uc-v mono uc-clip">{{
+                      pickAdminUserIdDisplay(row) || pickAdminUserKey(row) || '—'
+                    }}</span>
+                  </div>
+                  <div class="uc-cell" :title="pickUserEmail(row) || undefined">
+                    <span class="uc-l">邮箱</span>
+                    <span class="uc-v uc-clip">{{ pickUserEmail(row) || '—' }}</span>
+                  </div>
+                  <div class="uc-cell" :title="pickRegisterIp(row) || undefined">
+                    <span class="uc-l">注册 IP</span>
+                    <span class="uc-v mono uc-clip">{{ pickRegisterIp(row) || '—' }}</span>
+                  </div>
+                  <div class="uc-cell" :title="pickLoginIp(row) || undefined">
+                    <span class="uc-l">登录 IP</span>
+                    <span class="uc-v mono uc-clip">{{ pickLoginIp(row) || '—' }}</span>
+                  </div>
+                  <div
+                    class="uc-cell"
+                    :title="formatAdminListDateTime(pickRegisterAtRaw(row))"
+                  >
+                    <span class="uc-l">注册时间</span>
+                    <span class="uc-v mono uc-clip">{{
+                      formatAdminListDateTime(pickRegisterAtRaw(row))
+                    }}</span>
+                  </div>
+                  <div
+                    class="uc-cell"
+                    :title="formatAdminListDateTime(pickLastLoginAtRaw(row))"
+                  >
+                    <span class="uc-l">上次登录</span>
+                    <span class="uc-v mono uc-clip">{{
+                      formatAdminListDateTime(pickLastLoginAtRaw(row))
+                    }}</span>
+                  </div>
+                  <div class="uc-roles" @click.stop>
+                    <button
+                      v-for="r in MANAGEABLE_ROLES"
+                      :key="r.code"
+                      type="button"
+                      class="rt-pill"
+                      :class="{ on: rowHasRole(row, r.code) }"
+                      :title="
+                        rowHasRole(row, r.code)
+                          ? `收回「${r.label}」`
+                          : `授予「${r.label}」`
+                      "
+                      :disabled="
+                        listLoading ||
+                        isPending(pickAdminUserKey(row), `grant:${r.code}`) ||
+                        isPending(pickAdminUserKey(row), `revoke:${r.code}`)
+                      "
+                      @click="
+                        rowHasRole(row, r.code) ? revokeRole(row, r.code) : grantRole(row, r.code)
+                      "
+                    >
+                      {{
+                        isPending(pickAdminUserKey(row), `grant:${r.code}`) ||
+                        isPending(pickAdminUserKey(row), `revoke:${r.code}`)
+                          ? '…'
+                          : r.label
+                      }}
+                    </button>
+                  </div>
                 </div>
-                <p class="uc-nick">{{ pickNickname(row) || '未设置昵称' }}</p>
-                <p class="uc-roles">{{ roleSummary(row) }}</p>
               </div>
-              <span class="uc-chev" aria-hidden="true">›</span>
             </li>
           </ul>
 
@@ -365,7 +698,7 @@ loadList()
             <div class="detail-placeholder">
               <span class="ph-ic" aria-hidden="true">◇</span>
               <p class="ph-title">选择用户</p>
-              <p class="ph-sub">在左侧列表中点选一名用户，即可启停账号并发放或收回角色。</p>
+              <p class="ph-sub">点选用户可启停账号或删除用户；角色请在列表行内直接切换。</p>
             </div>
           </template>
 
@@ -428,62 +761,9 @@ loadList()
               </div>
             </section>
 
-            <section class="detail-section">
-              <h3 class="ds-h">角色权限</h3>
-              <p class="ds-desc">
-              角色列表来自
-              <code class="mono">GET /api/user/{userId}/roles</code>
-              ；发放走
-              <code class="mono">PUT …/role</code>
-              （Body:
-              <code class="mono">RoleRequest</code>
-              ）。收回走
-              <code class="mono">DELETE …/role/{role}</code>
-              （若接口未实现请点击收回时会报错，需在后端补充该方法）。
-            </p>
-              <ul class="role-grid">
-                <li v-for="r in MANAGEABLE_ROLES" :key="r.code" class="role-cell">
-                  <div class="role-cell-head">
-                    <span class="role-name">{{ r.label }}</span>
-                    <code class="role-code mono">{{ r.code }}</code>
-                  </div>
-                  <template v-if="rowHasRole(selected, r.code)">
-                    <span class="badge-on">已授予</span>
-                    <button
-                      type="button"
-                      class="btn-revoke"
-                      :disabled="isPending(pickAdminUserKey(selected), `revoke:${r.code}`)"
-                      @click.stop="revokeRole(selected, r.code)"
-                    >
-                      {{
-                        isPending(pickAdminUserKey(selected), `revoke:${r.code}`)
-                          ? '…'
-                          : '收回'
-                      }}
-                    </button>
-                  </template>
-                  <template v-else>
-                    <span class="badge-off">未授予</span>
-                    <button
-                      type="button"
-                      class="btn-grant"
-                      :disabled="isPending(pickAdminUserKey(selected), `grant:${r.code}`)"
-                      @click.stop="grantRole(selected, r.code)"
-                    >
-                      {{
-                        isPending(pickAdminUserKey(selected), `grant:${r.code}`)
-                          ? '…'
-                          : '发放'
-                      }}
-                    </button>
-                  </template>
-                </li>
-              </ul>
-            </section>
-
             <section class="detail-section danger-zone">
               <h3 class="ds-h danger-h">危险操作</h3>
-              <p class="ds-desc">删除用户将调用后端 DELETE，请谨慎操作。</p>
+              <p class="ds-desc">删除后无法恢复，请谨慎操作。</p>
               <button
                 type="button"
                 class="btn-delete"
@@ -498,22 +778,47 @@ loadList()
               </button>
             </section>
 
-            <details class="api-details">
-              <summary>与当前 UserController 对齐的接口</summary>
-              <ul class="api-list mono">
-                <li>GET /api/user/list?keyword=&amp;page=&amp;size=</li>
-                <li>PUT /api/user/{userId}/enable</li>
-                <li>PUT /api/user/{userId}/disable</li>
-                <li>PUT /api/user/{userId}/role — body: { "role": "auditor" }</li>
-                <li>GET /api/user/{userId}/roles</li>
-                <li>DELETE /api/user/{userId}</li>
-                <li class="api-li-warn">DELETE /api/user/{userId}/role/{role} — 建议新增，用于收回角色</li>
-              </ul>
-            </details>
           </template>
         </aside>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="confirmOpen"
+        class="um-confirm-backdrop"
+        role="presentation"
+        @click.self="closeConfirmDialog"
+      >
+        <div
+          class="um-confirm-dialog"
+          :class="`um-confirm--${confirmVariant}`"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="um-confirm-title"
+          @click.stop
+        >
+          <h3 id="um-confirm-title" class="um-confirm-title">{{ confirmTitle }}</h3>
+          <p class="um-confirm-body">{{ confirmBody }}</p>
+          <div class="um-confirm-actions">
+            <button type="button" class="um-confirm-btn um-confirm-cancel" @click="closeConfirmDialog">
+              取消
+            </button>
+            <button
+              type="button"
+              class="um-confirm-btn um-confirm-ok"
+              :class="{
+                'um-confirm-ok--danger': confirmVariant === 'danger',
+                'um-confirm-ok--warning': confirmVariant === 'warning',
+              }"
+              @click="executeConfirm"
+            >
+              确定
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -529,36 +834,26 @@ loadList()
 
 .um-page {
   width: 100%;
-  max-width: 1120px;
+  max-width: none;
 }
 
-.hero {
-  position: relative;
-  margin-bottom: 1.25rem;
+.hero-compact {
+  margin-bottom: 0.85rem;
 }
 
-.hero-bloom {
-  position: absolute;
-  width: 280px;
-  height: 280px;
-  right: -40px;
-  top: -90px;
-  border-radius: 50%;
-  background: radial-gradient(
-    circle,
-    rgba(167, 139, 250, 0.28) 0%,
-    rgba(99, 102, 241, 0.1) 45%,
-    transparent 70%
-  );
-  pointer-events: none;
-  z-index: 0;
+.hero-compact .title {
+  font-size: 1.28rem;
+  margin-bottom: 0.25rem;
+}
+
+.hero-compact .lead {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  max-width: 52rem;
 }
 
 .title {
-  position: relative;
-  z-index: 1;
-  margin: 0 0 0.45rem;
-  font-size: 1.58rem;
+  margin: 0 0 0.35rem;
   font-weight: 780;
   letter-spacing: -0.03em;
   background: linear-gradient(118deg, #ede9fe 0%, #a78bfa 36%, #818cf8 68%, #cbd5e1 100%);
@@ -568,18 +863,8 @@ loadList()
 }
 
 .lead {
-  position: relative;
-  z-index: 1;
   margin: 0;
-  font-size: 0.9rem;
-  line-height: 1.62;
   color: var(--bccr-muted);
-  max-width: 40rem;
-}
-
-.lead .mono {
-  font-size: 0.82em;
-  color: rgba(196, 181, 253, 0.92);
 }
 
 .banner-err {
@@ -588,14 +873,14 @@ loadList()
   border-radius: 0.55rem;
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(248, 113, 113, 0.28);
-  color: #fecaca;
+  color: var(--bccr-danger);
   font-size: 0.88rem;
 }
 
 .um-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
-  gap: 1.15rem;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: 1rem;
   align-items: start;
 }
 
@@ -608,17 +893,17 @@ loadList()
 .panel {
   border-radius: 1.05rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(15, 23, 42, 0.48);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.2);
+  background: var(--bccr-card);
+  box-shadow: 0 18px 48px var(--bccr-hover);
 }
 
 .list-panel {
-  padding: 1.15rem 1.2rem;
+  padding: 1rem 1.1rem;
   border-color: rgba(139, 92, 246, 0.14);
 }
 
 .detail-panel {
-  padding: 1.25rem 1.3rem;
+  padding: 1.1rem 1.15rem;
   position: sticky;
   top: 0.75rem;
   border-color: rgba(129, 140, 248, 0.18);
@@ -634,74 +919,105 @@ loadList()
   margin-bottom: 1rem;
 }
 
-.search-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.55rem;
-  align-items: center;
+.toolbar-compact {
+  margin-bottom: 0.7rem;
 }
 
-.inp-search {
-  flex: 1;
-  min-width: 160px;
-  padding: 0.58rem 0.78rem;
-  border-radius: 0.55rem;
+.filter-toolbar {
+  padding: 0.85rem 0.95rem 0.95rem;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr));
+  gap: 0.55rem 0.75rem;
+  align-items: end;
+  width: 100%;
+}
+
+.ff {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  min-width: 0;
+}
+
+.ff-l {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--bccr-muted);
+}
+
+.ff-inp {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.48rem 0.55rem;
+  border-radius: 0.5rem;
   border: 1px solid rgba(148, 163, 184, 0.22);
-  background: rgba(15, 23, 42, 0.72);
+  background: var(--bccr-card);
   color: var(--bccr-text);
-  font-size: 0.9rem;
+  font-size: 0.86rem;
   outline: none;
 }
 
-.inp-search:focus {
+.ff-inp:focus {
   border-color: rgba(167, 139, 250, 0.45);
-  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.15);
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.12);
 }
 
-.btn-accent {
-  padding: 0.55rem 1rem;
-  border-radius: 0.55rem;
-  border: none;
-  font-weight: 650;
-  font-size: 0.88rem;
-  color: #f5f3ff;
-  cursor: pointer;
-  background: linear-gradient(135deg, #7c3aed, #6366f1);
-  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.28);
-}
-
-.btn-accent:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.btn-ghost {
-  padding: 0.52rem 0.85rem;
-  border-radius: 0.55rem;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  background: rgba(30, 41, 59, 0.35);
-  color: var(--bccr-muted);
-  font-size: 0.85rem;
-  font-weight: 600;
+.ff-select {
   cursor: pointer;
 }
 
-.btn-ghost:hover:not(:disabled) {
-  color: #e2e8f0;
-  border-color: rgba(167, 139, 250, 0.35);
+.ff-size {
+  max-width: 9rem;
 }
 
-.toolbar-meta {
-  margin: 0.55rem 0 0;
-  font-size: 0.78rem;
+.filter-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  padding-top: 0.15rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+  margin-top: 0.15rem;
+}
+
+.filter-actions .toolbar-meta-inline {
+  margin-left: auto;
+}
+
+@media (max-width: 520px) {
+  .filter-actions .toolbar-meta-inline {
+    width: 100%;
+    margin-left: 0;
+    margin-top: 0.35rem;
+    text-align: center;
+  }
+}
+
+.toolbar-meta-inline {
+  margin-left: auto;
+  font-size: 0.76rem;
   color: var(--bccr-muted);
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .toolbar-meta-inline {
+    width: 100%;
+    margin-left: 0;
+    margin-top: 0.35rem;
+  }
 }
 
 .empty {
   text-align: center;
   padding: 2rem 1rem;
   font-size: 0.9rem;
-  color: #e2e8f0;
+  color: var(--bccr-text);
 }
 
 .empty.muted {
@@ -732,11 +1048,11 @@ loadList()
 .user-card {
   display: flex;
   align-items: center;
-  gap: 0.85rem;
-  padding: 0.75rem 0.85rem;
-  border-radius: 0.75rem;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(0, 0, 0, 0.15);
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 0.55rem;
+  border: 1px solid var(--bccr-choice-surface-border);
+  background: #ffffff;
   cursor: pointer;
   transition:
     border-color 0.15s,
@@ -745,24 +1061,25 @@ loadList()
 }
 
 .user-card:hover {
-  border-color: rgba(167, 139, 250, 0.35);
-  background: rgba(76, 29, 149, 0.08);
+  border-color: var(--bccr-option-hover-border);
+  background: var(--bccr-option-hover-bg);
+  box-shadow: var(--bccr-shadow-sm);
 }
 
 .user-card.active {
-  border-color: rgba(167, 139, 250, 0.55);
-  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.12);
-  background: linear-gradient(125deg, rgba(76, 29, 149, 0.14), rgba(15, 23, 42, 0.35));
+  border-color: var(--bccr-option-active-border);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.08);
+  background: var(--bccr-option-active-bg);
 }
 
 .uc-av {
   flex-shrink: 0;
-  width: 2.85rem;
-  height: 2.85rem;
+  width: 2.15rem;
+  height: 2.15rem;
   border-radius: 50%;
   overflow: hidden;
   border: 2px solid rgba(167, 139, 250, 0.35);
-  background: rgba(30, 41, 59, 0.9);
+  background: var(--bccr-surface-muted);
 }
 
 .uc-img {
@@ -777,72 +1094,189 @@ loadList()
   justify-content: center;
   width: 100%;
   height: 100%;
-  font-size: 1rem;
+  font-size: 0.85rem;
   font-weight: 750;
-  color: #ddd6fe;
+  color: #6d28d9;
 }
 
-.uc-body {
+.uc-row-wrap {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
-.uc-top {
-  display: flex;
+.uc-row {
+  display: grid;
+  width: 100%;
   align-items: center;
-  gap: 0.45rem;
+  column-gap: 0.28rem;
+  row-gap: 0.2rem;
+  grid-template-columns:
+    minmax(0, 1.05fr)
+    minmax(0, 0.48fr)
+    minmax(0, 1.05fr)
+    minmax(0, 0.52fr)
+    minmax(0, 0.52fr)
+    minmax(0, 0.72fr)
+    minmax(0, 0.72fr)
+    minmax(0, 1.15fr);
+}
+
+.uc-core {
+  display: flex;
+  flex-direction: row;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.28rem;
+  min-width: 0;
+  padding: 0.12rem 0.2rem;
+  text-align: center;
+  border-right: 1px solid var(--bccr-choice-surface-border);
 }
 
 .uc-name {
   font-weight: 700;
-  font-size: 0.92rem;
-  color: #f8fafc;
+  font-size: 0.84rem;
+  color: var(--bccr-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .uc-status {
-  font-size: 0.68rem;
+  font-size: 0.6rem;
   font-weight: 650;
-  padding: 0.15rem 0.45rem;
+  padding: 0.1rem 0.35rem;
   border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .uc-status.tone-ok {
   background: rgba(34, 197, 94, 0.15);
-  color: #bbf7d0;
+  color: var(--bccr-success-text);
 }
 
 .uc-status.tone-bad {
   background: rgba(248, 113, 113, 0.14);
-  color: #fecaca;
+  color: var(--bccr-danger);
 }
 
 .uc-status.tone-muted {
   background: rgba(148, 163, 184, 0.12);
-  color: #cbd5e1;
-}
-
-.uc-nick {
-  margin: 0.2rem 0 0.1rem;
-  font-size: 0.8rem;
   color: var(--bccr-muted);
 }
 
-.uc-roles {
+.uc-nick {
   margin: 0;
-  font-size: 0.72rem;
-  color: rgba(196, 181, 253, 0.88);
-  line-height: 1.35;
+  font-size: 0.66rem;
+  color: var(--bccr-muted);
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.uc-chev {
-  flex-shrink: 0;
-  font-size: 1.35rem;
-  color: rgba(148, 163, 184, 0.45);
-  font-weight: 300;
+.uc-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 0.1rem;
+  min-width: 0;
+  padding: 0.12rem 0.18rem;
+  border-right: 1px solid var(--bccr-choice-surface-border);
+}
+
+.uc-l {
+  font-size: 0.54rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--bccr-muted);
+  white-space: nowrap;
+  width: 100%;
+  text-align: center;
+}
+
+.uc-v {
+  font-size: 0.66rem;
+  color: var(--bccr-text);
+  line-height: 1.25;
+  min-width: 0;
+  width: 100%;
+  text-align: center;
+}
+
+.uc-v.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+  letter-spacing: -0.02em;
+}
+
+.uc-clip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+  max-width: 100%;
+}
+
+.uc-roles {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-content: center;
+  align-items: center;
+  gap: 0.2rem;
+  min-width: 0;
+  padding: 0.12rem 0.15rem;
+  margin-left: 0;
+  border-left: none;
+  border-right: none;
+}
+
+.rt-pill {
+  padding: 0.12rem 0.32rem;
+  border-radius: 999px;
+  border: 1px solid var(--bccr-option-border);
+  background: var(--bccr-choice-surface-bg);
+  color: var(--bccr-option-text);
+  font-size: 0.58rem;
+  font-weight: 650;
+  cursor: pointer;
+  line-height: 1.25;
+  white-space: nowrap;
+  max-width: 100%;
+  transition:
+    border-color 0.12s,
+    background 0.12s,
+    color 0.12s;
+}
+
+.rt-pill:hover:not(:disabled) {
+  border-color: var(--bccr-option-hover-border);
+  background: var(--bccr-option-hover-bg);
+  color: var(--bccr-text);
+}
+
+.rt-pill.on {
+  border-color: rgba(22, 163, 74, 0.38);
+  background: var(--bccr-success-soft);
+  color: var(--bccr-success-text);
+}
+
+.rt-pill.on:hover:not(:disabled) {
+  border-color: rgba(220, 38, 38, 0.35);
+  background: var(--bccr-danger-soft);
+  color: var(--bccr-danger);
+}
+
+.rt-pill:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .pager {
@@ -853,21 +1287,6 @@ loadList()
   margin-top: 1.1rem;
   padding-top: 0.85rem;
   border-top: 1px solid rgba(148, 163, 184, 0.1);
-}
-
-.btn-page {
-  padding: 0.42rem 0.85rem;
-  border-radius: 0.45rem;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  background: rgba(30, 41, 59, 0.4);
-  color: #e2e8f0;
-  font-size: 0.82rem;
-  cursor: pointer;
-}
-
-.btn-page:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
 }
 
 .pager-info {
@@ -892,7 +1311,7 @@ loadList()
   margin: 0 0 0.35rem;
   font-size: 1rem;
   font-weight: 650;
-  color: #cbd5e1;
+  color: var(--bccr-muted);
 }
 
 .ph-sub {
@@ -917,7 +1336,7 @@ loadList()
   border-radius: 50%;
   overflow: hidden;
   border: 3px solid rgba(167, 139, 250, 0.45);
-  background: rgba(30, 41, 59, 0.95);
+  background: var(--bccr-surface-muted);
 }
 
 .dh-img {
@@ -934,14 +1353,14 @@ loadList()
   height: 100%;
   font-size: 1.45rem;
   font-weight: 780;
-  color: #ddd6fe;
+  color: #6d28d9;
 }
 
 .dh-title {
   margin: 0 0 0.25rem;
   font-size: 1.12rem;
   font-weight: 720;
-  color: #f8fafc;
+  color: var(--bccr-text);
   word-break: break-all;
 }
 
@@ -959,7 +1378,7 @@ loadList()
   padding: 0.18rem 0.5rem;
   border-radius: 999px;
   background: rgba(52, 211, 153, 0.15);
-  color: #a7f3d0;
+  color: var(--bccr-success-text);
 }
 
 .detail-loading {
@@ -1004,17 +1423,17 @@ loadList()
 
 .pill-lg.tone-ok {
   background: rgba(34, 197, 94, 0.14);
-  color: #bbf7d0;
+  color: var(--bccr-success-text);
 }
 
 .pill-lg.tone-bad {
   background: rgba(248, 113, 113, 0.12);
-  color: #fecaca;
+  color: var(--bccr-danger);
 }
 
 .pill-lg.tone-muted {
   background: rgba(148, 163, 184, 0.12);
-  color: #cbd5e1;
+  color: var(--bccr-muted);
 }
 
 .btn-warn {
@@ -1022,7 +1441,7 @@ loadList()
   border-radius: 0.45rem;
   border: 1px solid rgba(248, 113, 113, 0.4);
   background: rgba(248, 113, 113, 0.1);
-  color: #fecaca;
+  color: var(--bccr-danger);
   font-size: 0.82rem;
   font-weight: 650;
   cursor: pointer;
@@ -1038,7 +1457,7 @@ loadList()
   border-radius: 0.45rem;
   border: 1px solid rgba(74, 222, 128, 0.38);
   background: rgba(34, 197, 94, 0.12);
-  color: #bbf7d0;
+  color: var(--bccr-success-text);
   font-size: 0.82rem;
   font-weight: 650;
   cursor: pointer;
@@ -1049,116 +1468,17 @@ loadList()
   cursor: not-allowed;
 }
 
-.role-grid {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.55rem;
-}
-
-.role-cell {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 0.45rem 0.55rem;
-  align-items: center;
-  padding: 0.65rem 0.72rem;
-  border-radius: 0.6rem;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(0, 0, 0, 0.14);
-}
-
-.role-cell-head {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.role-name {
-  font-size: 0.88rem;
-  font-weight: 650;
-  color: #f1f5f9;
-}
-
-.role-code {
-  font-size: 0.68rem;
-  color: rgba(167, 139, 250, 0.85);
-}
-
-.badge-on {
-  font-size: 0.72rem;
-  color: #a7f3d0;
-}
-
-.badge-off {
-  font-size: 0.72rem;
-  color: var(--bccr-muted);
-}
-
-.btn-grant {
-  padding: 0.32rem 0.65rem;
-  border-radius: 0.4rem;
-  border: 1px solid rgba(129, 140, 248, 0.45);
-  background: rgba(99, 102, 241, 0.18);
-  color: #c7d2fe;
-  font-size: 0.76rem;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.btn-grant:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.btn-revoke {
-  padding: 0.32rem 0.65rem;
-  border-radius: 0.4rem;
-  border: 1px solid rgba(251, 113, 133, 0.35);
-  background: rgba(244, 63, 94, 0.1);
-  color: #fecdd3;
-  font-size: 0.76rem;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.btn-revoke:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.api-details {
-  margin-top: 0.5rem;
-  font-size: 0.74rem;
-  color: var(--bccr-muted);
-}
-
-.api-details summary {
-  cursor: pointer;
-  color: rgba(148, 163, 184, 0.95);
-}
-
-.api-list {
-  margin: 0.5rem 0 0;
-  padding-left: 1.1rem;
-  line-height: 1.65;
-  font-size: 0.7rem;
-}
-
-.mono {
-  font-family: ui-monospace, monospace;
-}
-
 .danger-zone {
   padding-top: 0.25rem;
-  border-top: 1px dashed rgba(248, 113, 113, 0.25);
+  border-top: 1px dashed rgba(220, 38, 38, 0.22);
+  background: linear-gradient(180deg, transparent, rgba(254, 242, 242, 0.5));
+  border-radius: 0 0 0.5rem 0.5rem;
+  margin-top: 0.35rem;
+  padding-bottom: 0.15rem;
 }
 
 .danger-h {
-  color: rgba(252, 165, 165, 0.95) !important;
+  color: var(--bccr-danger) !important;
 }
 
 .btn-delete {
@@ -1166,9 +1486,9 @@ loadList()
   width: 100%;
   padding: 0.52rem 0.85rem;
   border-radius: 0.5rem;
-  border: 1px solid rgba(248, 113, 113, 0.45);
+  border: 1px solid var(--bccr-btn-danger-border);
   background: rgba(244, 63, 94, 0.12);
-  color: #fecaca;
+  color: var(--bccr-danger);
   font-size: 0.84rem;
   font-weight: 650;
   cursor: pointer;
@@ -1183,7 +1503,131 @@ loadList()
   cursor: not-allowed;
 }
 
-.api-li-warn {
-  color: rgba(251, 191, 36, 0.92);
+/* 居中确认弹窗（Teleport 至 body，仍受 scoped 属性作用） */
+.um-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  box-sizing: border-box;
+  background: var(--bccr-overlay);
+  backdrop-filter: blur(6px);
 }
+
+.um-confirm-dialog {
+  width: 100%;
+  max-width: 400px;
+  border-radius: 1rem;
+  border: 1px solid var(--bccr-choice-surface-border);
+  background: #ffffff;
+  box-shadow: var(--bccr-shadow-lg);
+  padding: 1.35rem 1.4rem 1.2rem;
+  animation: um-confirm-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes um-confirm-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.um-confirm--danger {
+  border-color: rgba(220, 38, 38, 0.32);
+  background: linear-gradient(165deg, #ffffff 0%, #fef2f2 55%, #fff1f2 100%);
+}
+
+.um-confirm--warning {
+  border-color: var(--bccr-warning-border);
+  background: linear-gradient(165deg, #ffffff 0%, #fffbeb 55%, #fff7ed 100%);
+}
+
+.um-confirm-title {
+  margin: 0 0 0.65rem;
+  font-size: 1.08rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  color: var(--bccr-text);
+  line-height: 1.35;
+}
+
+.um-confirm--danger .um-confirm-title {
+  color: var(--bccr-danger);
+}
+
+.um-confirm--warning .um-confirm-title {
+  color: var(--bccr-warning-text);
+}
+
+.um-confirm-body {
+  margin: 0 0 1.25rem;
+  font-size: 0.88rem;
+  line-height: 1.58;
+  color: var(--bccr-text-secondary);
+}
+
+.um-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.um-confirm-btn {
+  padding: 0.48rem 1.05rem;
+  border-radius: 0.5rem;
+  font-size: 0.86rem;
+  font-weight: 650;
+  cursor: pointer;
+  border: none;
+  transition:
+    background 0.15s,
+    transform 0.12s;
+}
+
+.um-confirm-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.um-confirm-cancel {
+  background: var(--bccr-btn-ghost-bg);
+  color: var(--bccr-btn-ghost-text);
+  border: 1px solid var(--bccr-btn-ghost-border);
+}
+
+.um-confirm-cancel:hover {
+  background: var(--bccr-btn-ghost-hover-bg);
+  border-color: var(--bccr-btn-ghost-hover-border);
+  color: var(--bccr-btn-ghost-hover-text);
+}
+
+.um-confirm-ok {
+  background: var(--bccr-btn-primary-bg);
+  color: var(--bccr-on-accent);
+  box-shadow: var(--bccr-shadow-sm);
+}
+
+.um-confirm-ok:hover {
+  background: var(--bccr-btn-primary-hover);
+}
+
+.um-confirm-ok--warning {
+  background: linear-gradient(135deg, #d97706, #ea580c);
+  color: #ffffff;
+  box-shadow: 0 4px 16px rgba(234, 88, 12, 0.22);
+}
+
+.um-confirm-ok--danger {
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  color: #ffffff;
+  box-shadow: 0 4px 16px rgba(220, 38, 38, 0.22);
+}
+
 </style>
