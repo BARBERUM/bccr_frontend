@@ -31,10 +31,18 @@ export function normalizeAuditList(data) {
 }
 
 /**
- * 待审核/待处理队列（GET /api/audit/pending）
+ * 待审核作品分页（GET /api/audit/pending?page=&size=）
+ * @param {{ page?: number, size?: number }} [params]
  */
-export function fetchPendingAuditQueue() {
-  return request('/api/audit/pending', { method: 'GET' })
+export function fetchPendingAuditQueue(params = {}) {
+  const page = Math.max(1, Number(params.page) || 1)
+  let size = Math.min(50, Math.max(1, Number(params.size) || 20))
+  return request(`/api/audit/pending?page=${page}&size=${size}`, { method: 'GET' })
+}
+
+/** @param {unknown} data */
+export function normalizeAuditWorkPage(data) {
+  return normalizeListPage(data)
 }
 
 /**
@@ -113,7 +121,7 @@ export function rejectAuditCase(workId, body = {}) {
   if (!enc) throw new Error('缺少作品 ID')
   const json = compactRemark(body)
   return request(`/api/audit/${enc}/reject`, {
-    method: 'POST',
+    method: 'PUT',
     ...(json ? { json } : {}),
   })
 }

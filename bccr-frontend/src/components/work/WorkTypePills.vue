@@ -1,4 +1,5 @@
 <script setup>
+import BccrIcon from '@/components/icons/BccrIcon.vue'
 import { WORK_TYPE_OPTIONS } from '@/constants/workTypes'
 
 defineProps({
@@ -6,6 +7,16 @@ defineProps({
 })
 
 defineEmits(['update:modelValue'])
+
+/** @param {string} value */
+function iconForWorkType(value) {
+  const k = String(value ?? '').toUpperCase()
+  if (k === 'IMAGE') return 'image'
+  if (k === 'TEXT') return 'text'
+  if (k === 'VIDEO') return 'video'
+  if (k === 'AUDIO') return 'audio'
+  return 'image'
+}
 </script>
 
 <template>
@@ -19,6 +30,9 @@ defineEmits(['update:modelValue'])
         :class="{ on: modelValue === o.value }"
         @click="$emit('update:modelValue', o.value)"
       >
+        <span class="bccr-tab-ic-wrap" aria-hidden="true">
+          <BccrIcon :name="iconForWorkType(o.value)" size="sm" />
+        </span>
         {{ o.label }}
       </button>
     </div>
@@ -37,6 +51,9 @@ defineEmits(['update:modelValue'])
 }
 
 .type-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   padding: 0.42rem 0.8rem;
   border-radius: 999px;
   border: 1px solid var(--bccr-option-border);

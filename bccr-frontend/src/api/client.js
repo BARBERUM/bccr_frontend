@@ -176,6 +176,32 @@ export async function fetchTextFromUrl(url) {
   return await res.text()
 }
 
+/**
+ * 带 JWT 拉取媒体为 Blob URL，供 video/audio 在需鉴权时使用
+ * @param {string} url
+ * @returns {Promise<string>}
+ */
+export async function fetchMediaBlobUrl(url) {
+  if (!url || typeof url !== 'string') {
+    throw new Error('无效的文件地址')
+  }
+  const target = normalizeMediaSrc(url)
+  if (!target) {
+    throw new Error('无效的文件地址')
+  }
+  const headers = new Headers()
+  const token = getStoredToken()
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  const res = await fetch(target, { headers })
+  if (!res.ok) {
+    throw new Error(`加载媒体失败（HTTP ${res.status}）`)
+  }
+  const blob = await res.blob()
+  return URL.createObjectURL(blob)
+}
+
 export function extractToken(data) {
   if (!data || typeof data !== 'object') return ''
   return (

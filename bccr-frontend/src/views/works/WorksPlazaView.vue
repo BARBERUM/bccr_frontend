@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import WorkCardThumb from '@/components/work/WorkCardThumb.vue'
 import * as workApi from '@/api/work'
 
 const router = useRouter()
@@ -343,20 +344,14 @@ watch(
         @keydown.enter.prevent="goDetail(w.id)"
       >
         <div class="thumb" :class="{ 'thumb--text': w.kind === 'text' }">
-          <img
-            v-if="w.kind === 'image' && w.cover"
-            :src="w.cover"
-            :alt="w.title"
+          <WorkCardThumb
+            :kind="w.kind"
+            :cover="w.cover"
+            :media-url="w.mediaUrl"
+            :title="w.title"
+            :text-preview="w.textPreview"
+            :type-label="formatType(w.type)"
           />
-          <div v-else-if="w.kind === 'text'" class="thumb-text-wrap">
-            <span class="thumb-text-label">文本摘要</span>
-            <p class="thumb-text">{{ w.textPreview || '（列表未返回正文摘要，可进入详情查看）' }}</p>
-          </div>
-          <img v-else-if="w.cover" :src="w.cover" :alt="w.title" />
-          <div v-else class="thumb-ph-wrap">
-            <span class="thumb-ph">{{ formatType(w.type).charAt(0) || '作' }}</span>
-            <p class="thumb-ph-sub">{{ formatType(w.type) }}</p>
-          </div>
         </div>
         <div class="body">
           <h3 class="title">{{ w.title }}</h3>
@@ -698,76 +693,8 @@ watch(
   overflow: hidden;
 }
 
-.thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
 .thumb--text {
   align-items: stretch;
-  background: linear-gradient(145deg, var(--bccr-surface), rgba(6, 78, 59, 0.35));
-}
-
-.thumb-text-wrap {
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-  padding: 0.55rem 0.75rem 0.6rem;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  box-sizing: border-box;
-}
-
-.thumb-text-label {
-  flex-shrink: 0;
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--bccr-success-text);
-}
-
-.thumb-text {
-  margin: 0;
-  flex: 1;
-  min-height: 0;
-  font-size: 0.8rem;
-  line-height: 1.5;
-  color: var(--bccr-text);
-  text-align: left;
-  display: -webkit-box;
-  -webkit-line-clamp: 5;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-word;
-}
-
-.thumb-ph {
-  font-size: 2rem;
-  font-weight: 700;
-  color: var(--bccr-text-hint);
-}
-
-.thumb-ph-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.35rem;
-  width: 100%;
-  height: 100%;
-  padding: 0.75rem;
-  box-sizing: border-box;
-}
-
-.thumb-ph-sub {
-  margin: 0;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--bccr-muted);
 }
 
 .body {

@@ -135,7 +135,7 @@ function clearForbiddenTip() {
           :style="{ '--tile-accent': accentAt(i) }"
         >
           <div class="tile-icon" aria-hidden="true">
-            <DashboardNavIcon :label="item.label" />
+            <DashboardNavIcon :name="item.icon" :label="item.label" />
           </div>
           <div class="tile-text">
             <span class="tile-title">{{ item.label }}</span>

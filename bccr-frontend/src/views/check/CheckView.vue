@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import BccrIcon from '@/components/icons/BccrIcon.vue'
 import FileDropZone from '@/components/work/FileDropZone.vue'
 import SimilarityMatchList from '@/components/work/SimilarityMatchList.vue'
 import WorkTypePills from '@/components/work/WorkTypePills.vue'
@@ -15,14 +16,13 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import * as plagiarismApi from '@/api/plagiarism'
 import {
-  fetchMyWorkList,
   fetchWorkDetail,
   formatWorkDetail,
   formatWorkSummary,
-  normalizeListPage,
   normalizeWorkIdParam,
   recheckWork,
 } from '@/api/work'
+import { fetchMyWorkPickSuggestions } from '@/lib/workPick'
 
 const router = useRouter()
 const route = useRoute()
@@ -503,16 +503,11 @@ async function fetchRecheckWorkSuggestions(keyword) {
   recheckWorkSuggestions.value = []
   recheckWorkSearchError.value = ''
   try {
-    const data = await fetchMyWorkList({
-      keyword: kw,
-      workName: kw,
-      page: 1,
-      size: 24,
+    recheckWorkSuggestions.value = await fetchMyWorkPickSuggestions({
+      query: kw,
+      myAddress: blockchainFromUser.value,
+      pageSize: 50,
     })
-    const page = normalizeListPage(data)
-    recheckWorkSuggestions.value = page.items.map((row) =>
-      formatWorkSummary(/** @type {Record<string, unknown>} */ (row)),
-    )
   } catch (e) {
     recheckWorkSearchError.value = e?.message || '作品搜索失败'
     recheckWorkSuggestions.value = []
@@ -717,7 +712,9 @@ watch(
             :aria-selected="mainTab === 'check'"
             @click="mainTab = 'check'"
           >
-            <span class="main-tab-ic" aria-hidden="true">◈</span>
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="manual-check" size="sm" />
+            </span>
             手动查重
           </button>
           <button
@@ -728,7 +725,9 @@ watch(
             :aria-selected="mainTab === 'recheck'"
             @click="mainTab = 'recheck'"
           >
-            <span class="main-tab-ic" aria-hidden="true">◎</span>
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="recheck" size="sm" />
+            </span>
             链上作品再查重
           </button>
           <button
@@ -739,7 +738,9 @@ watch(
             :aria-selected="mainTab === 'records'"
             @click="mainTab = 'records'"
           >
-            <span class="main-tab-ic" aria-hidden="true">☰</span>
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="records" size="sm" />
+            </span>
             查重记录
           </button>
         </div>
@@ -813,7 +814,7 @@ watch(
                   v-model="recheckWorkSearchInput"
                   type="text"
                   class="inp combo-inp"
-                  placeholder="输入作品名称关键字…"
+                  placeholder="作品名称关键字或作品 ID…"
                   autocomplete="off"
                   role="combobox"
                   :aria-expanded="recheckWorkSuggestOpen"
@@ -942,6 +943,9 @@ watch(
             :class="{ active: recordTab === 'mine' }"
             @click="recordTab = 'mine'"
           >
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="mine" size="sm" />
+            </span>
             我的记录
           </button>
           <button
@@ -950,6 +954,9 @@ watch(
             :class="{ active: recordTab === 'work' }"
             @click="recordTab = 'work'"
           >
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="work-id" size="sm" />
+            </span>
             按作品 ID
           </button>
           <button
@@ -958,6 +965,9 @@ watch(
             :class="{ active: recordTab === 'check' }"
             @click="recordTab = 'check'"
           >
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="id-card" size="sm" />
+            </span>
             按记录 ID
           </button>
         </div>
@@ -1306,11 +1316,6 @@ watch(
   box-shadow: 0 4px 18px rgba(59, 130, 246, 0.18);
 }
 
-.main-tab-ic {
-  opacity: 0.85;
-  font-size: 0.85rem;
-}
-
 .card {
   padding: 1.35rem 1.4rem;
   border-radius: 1rem;
@@ -1542,6 +1547,9 @@ watch(
 }
 
 .sub-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   padding: 0.42rem 0.85rem;
   border-radius: 0.5rem;
   border: 1px solid var(--bccr-option-border);

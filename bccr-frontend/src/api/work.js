@@ -145,7 +145,7 @@ export function fetchWorkSearch(params = {}) {
 /**
  * 当前用户本人作品分页（GET /api/work/my?keyword=&workName=&page=&size=）
  * 与路由「我的作品」说明一致；keyword / workName 可选，用于授权页按作品名关键字筛选（与后端参数名对齐即可）。
- * @param {{ page?: number, size?: number, keyword?: string, workName?: string, type?: string }} [params]
+ * @param {{ page?: number, size?: number, keyword?: string, workName?: string, workId?: string, type?: string }} [params]
  */
 export function fetchMyWorkList(params = {}) {
   const q = new URLSearchParams()
@@ -155,6 +155,9 @@ export function fetchMyWorkList(params = {}) {
   if (size < 1) size = 10
   q.set('page', String(page))
   q.set('size', String(size))
+  if (params.workId != null && String(params.workId).trim() !== '') {
+    q.set('workId', normalizeWorkIdParam(params.workId))
+  }
   if (params.workName != null && String(params.workName).trim() !== '') {
     q.set('workName', String(params.workName).trim())
   }
@@ -225,14 +228,34 @@ export function normalizeListPage(data) {
 
 /**
  * @param {unknown} type
- * @returns {'image' | 'text' | 'other'}
+ * @returns {'image' | 'text' | 'video' | 'audio' | 'other'}
  */
 export function workKind(type) {
   const raw = String(type ?? '').trim()
   const t = raw.toUpperCase()
   if (t === 'IMAGE' || t === 'IMG' || raw === '图片') return 'image'
   if (t === 'TEXT' || t === 'TXT' || raw === '文本') return 'text'
+  if (t === 'VIDEO' || raw === '视频') return 'video'
+  if (t === 'AUDIO' || raw === '音频') return 'audio'
   return 'other'
+}
+
+/** @param {Record<string, unknown>} w */
+export function pickMediaPlayUrl(w) {
+  if (!w || typeof w !== 'object') return ''
+  const order = [
+    w.filePath,
+    w.fileUrl,
+    w.url,
+    w.storageUrl,
+    w.mediaUrl,
+    w.videoUrl,
+    w.audioUrl,
+  ]
+  for (const u of order) {
+    if (typeof u === 'string' && u.trim()) return normalizeMediaSrc(u.trim())
+  }
+  return ''
 }
 
 /**
@@ -258,6 +281,8 @@ export function matchesWorkTypeFilter(row, worktypeFilter) {
   const k = workKind(row.type ?? row.workType ?? row.worktype ?? row.mediaType)
   if (f === 'IMAGE' && k === 'image') return true
   if (f === 'TEXT' && k === 'text') return true
+  if (f === 'VIDEO' && k === 'video') return true
+  if (f === 'AUDIO' && k === 'audio') return true
   return false
 }
 
@@ -300,6 +325,9 @@ function pickListPreviewImageUrl(w, kind) {
     w.coverUrl ??
     w.cover ??
     w.thumbnail ??
+    w.posterUrl ??
+    w.videoCover ??
+    w.firstFrameUrl ??
     w.previewUrl ??
     w.previewImageUrl ??
     w.thumbUrl
@@ -388,7 +416,10 @@ function pickNonNegInt(val) {
 
 export function formatWorkSummary(w) {
   const kind = workKind(w.type ?? w.workType ?? w.mediaType)
-  const cover = pickListPreviewImageUrl(w, kind)
+  const row = /** @type {Record<string, unknown>} */ (typeof w === 'object' && w ? w : {})
+  const cover = pickListPreviewImageUrl(row, kind)
+  const mediaUrl =
+    kind === 'video' || kind === 'audio' ? pickMediaPlayUrl(row) : ''
   return {
     id: String(w.workId ?? w.id ?? ''),
     title: String(
@@ -397,14 +428,13 @@ export function formatWorkSummary(w) {
     type: String(w.type ?? w.workType ?? w.mediaType ?? ''),
     kind,
     author: String(w.authorAddress ?? w.author ?? w.authorName ?? ''),
-    authorName: pickAuthorDisplayName(
-      /** @type {Record<string, unknown>} */ (typeof w === 'object' && w ? w : {}),
-    ),
+    authorName: pickAuthorDisplayName(row),
     likeCount: pickNonNegInt(w.likeCount ?? w.likeNum ?? w.likes ?? w.thumbCount),
     commentCount: pickNonNegInt(
       w.commentCount ?? w.comments ?? w.commentNum ?? w.commentsCount,
     ),
     cover,
+    mediaUrl,
     textPreview: pickTextPreview(w, kind === 'text' ? 320 : 160),
     fingerprint: String(w.fingerprint ?? w.fp ?? ''),
     createdAt: w.createdAt ?? w.createTime ?? w.gmtCreate ?? '',

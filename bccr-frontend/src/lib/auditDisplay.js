@@ -1,3 +1,4 @@
+import { formatSimilarity } from '@/lib/plagiarismDisplay'
 import { normalizeWorkIdParam } from '@/api/work'
 
 /** @param {Record<string, unknown>} row */
@@ -308,4 +309,261 @@ export function shortAddr(addr, head = 8, tail = 6) {
   const s = String(addr ?? '').trim()
   if (s.length <= head + tail + 1) return s || '—'
   return `${s.slice(0, head)}…${s.slice(-tail)}`
+}
+
+/** @param {Record<string, unknown>} row */
+export function pickWorkType(row) {
+  if (!row || typeof row !== 'object') return ''
+  const r = /** @type {Record<string, unknown>} */ (row)
+  return String(r.workType ?? r.type ?? r.mediaType ?? '').trim()
+}
+
+/** @param {Record<string, unknown>} row */
+export function pickWorkFingerprint(row) {
+  if (!row || typeof row !== 'object') return ''
+  const r = /** @type {Record<string, unknown>} */ (row)
+  return String(r.fingerprint ?? r.fp ?? r.featureCode ?? '').trim()
+}
+
+/** 链上 WorkInfo 等：若包在 workInfo / data 等键下则展开 */
+/** @param {unknown} raw */
+export function normalizeOnChainRecord(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const o = /** @type {Record<string, unknown>} */ (raw)
+  for (const k of ['workInfo', 'chainRecord', 'credential', 'onChain', 'onchain']) {
+    const nested = o[k]
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      return /** @type {Record<string, unknown>} */ (nested)
+    }
+  }
+  if (
+    o.workId != null ||
+    o.workName != null ||
+    o.fingerprint != null ||
+    o.featureCode != null ||
+    o.blockTime != null ||
+    o.timestamp != null
+  ) {
+    return o
+  }
+  const data = o.data
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    return normalizeOnChainRecord(data)
+  }
+  return o
+}
+
+const ONCHAIN_FP_KEYS = [
+  'fingerprint',
+  'fp',
+  'featureCode',
+  'feature_code',
+  'contentHash',
+  'content_hash',
+  'hash',
+]
+
+/**
+ * 链上凭证指纹：优先链上字段，否则回退作品详情中的指纹
+ * @param {unknown} onChain
+ * @param {unknown} [fallbackDetail]
+ */
+export function pickOnChainFingerprint(onChain, fallbackDetail) {
+  const chain = normalizeOnChainRecord(onChain)
+  if (chain) {
+    for (const k of ONCHAIN_FP_KEYS) {
+      const v = chain[k]
+      if (v != null && String(v).trim()) return String(v).trim()
+    }
+    const fromChain = pickWorkFingerprint(chain)
+    if (fromChain) return fromChain
+  }
+  if (fallbackDetail && typeof fallbackDetail === 'object') {
+    const d = /** @type {Record<string, unknown>} */ (fallbackDetail)
+    const raw =
+      d.raw && typeof d.raw === 'object'
+        ? /** @type {Record<string, unknown>} */ (d.raw)
+        : d
+    const fp = pickWorkFingerprint(raw)
+    if (fp) return fp
+    const direct = String(d.fingerprint ?? '').trim()
+    if (direct) return direct
+  }
+  return ''
+}
+
+/**
+ * @param {unknown} onChain
+ * @param {unknown} [fallbackDetail]
+ */
+export function pickOnChainBlockTimeRaw(onChain, fallbackDetail) {
+  const chain = normalizeOnChainRecord(onChain)
+  if (chain) {
+    const v =
+      chain.blockTime ??
+      chain.onChainTime ??
+      chain.chainTime ??
+      chain.blockAt ??
+      chain.timestamp ??
+      chain.time ??
+      chain.createTime ??
+      chain.createdAt ??
+      chain.registerTime ??
+      chain.gmtCreate
+    if (v != null && v !== '') return v
+  }
+  if (fallbackDetail && typeof fallbackDetail === 'object') {
+    const d = /** @type {Record<string, unknown>} */ (fallbackDetail)
+    const raw =
+      d.raw && typeof d.raw === 'object'
+        ? /** @type {Record<string, unknown>} */ (d.raw)
+        : d
+    const v =
+      raw.blockTime ?? raw.onChainTime ?? raw.chainTime ?? d.createdAt
+    if (v != null && v !== '') return v
+  }
+  return null
+}
+
+/** @param {unknown} v */
+export function formatDisplayTime(v) {
+  if (v == null || v === '') return '—'
+  if (typeof v === 'number' || /^-?\d+(\.\d+)?$/.test(String(v).trim())) {
+    const n = Number(v)
+    if (Number.isFinite(n)) {
+      const abs = Math.abs(n)
+      const ms = abs < 1e11 ? n * 1000 : n
+      const d = new Date(ms)
+      if (!Number.isNaN(d.getTime())) {
+        return d.toLocaleString('zh-CN', { hour12: false })
+      }
+    }
+  }
+  const d = new Date(/** @type {string | number | Date} */ (v))
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleString('zh-CN', { hour12: false })
+  }
+  return String(v)
+}
+
+/**
+ * @param {unknown} onChain
+ * @param {unknown} [fallbackDetail]
+ */
+export function formatOnChainBlockTime(onChain, fallbackDetail) {
+  return formatDisplayTime(pickOnChainBlockTimeRaw(onChain, fallbackDetail))
+}
+
+/** @param {Record<string, unknown>} row */
+export function pickWorkTxHash(row) {
+  if (!row || typeof row !== 'object') return ''
+  const r = /** @type {Record<string, unknown>} */ (row)
+  return String(r.txHash ?? r.transactionHash ?? '').trim()
+}
+
+/** @param {Record<string, unknown>} row */
+export function pickWorkBlockTime(row) {
+  if (!row || typeof row !== 'object') return ''
+  const r = /** @type {Record<string, unknown>} */ (row)
+  const v =
+    r.blockTime ??
+    r.onChainTime ??
+    r.chainTime ??
+    r.blockAt ??
+    r.timestamp ??
+    r.createTime ??
+    r.createdAt
+  return v != null && v !== '' ? String(v) : ''
+}
+
+/** @param {Record<string, unknown>} row */
+export function pickMatchWorkId(row) {
+  if (!row || typeof row !== 'object') return ''
+  const r = /** @type {Record<string, unknown>} */ (row)
+  const direct = String(r.matchWorkId ?? r.matchedWorkId ?? r.compareWorkId ?? '').trim()
+  if (direct) return normalizeWorkIdParam(direct)
+  const desc = String(r.description ?? r.remark ?? '').trim()
+  return parseMatchWorkIdFromText(desc)
+}
+
+/** @param {string} text */
+export function parseMatchWorkIdFromText(text) {
+  const s = String(text ?? '')
+  const m = s.match(/与作品\s*([A-Za-z0-9][\w-]{4,})/)
+  if (m?.[1]) return normalizeWorkIdParam(m[1])
+  const m2 = s.match(/作品\s+(work-[\w-]+)/i)
+  if (m2?.[1]) return normalizeWorkIdParam(m2[1])
+  return ''
+}
+
+/** @param {string} text */
+export function parseSimilarityFromText(text) {
+  const s = String(text ?? '')
+  const m = s.match(/相似度\s*([\d.]+)\s*%?/)
+  if (!m?.[1]) return null
+  const n = Number(m[1])
+  return Number.isFinite(n) ? n : null
+}
+
+/** @param {Record<string, unknown>} row */
+export function pickSimilarityValue(row) {
+  if (!row || typeof row !== 'object') return null
+  const r = /** @type {Record<string, unknown>} */ (row)
+  const raw = r.similarity ?? r.similarityScore ?? r.score
+  if (raw != null && raw !== '') {
+    const n = Number(raw)
+    if (Number.isFinite(n)) return n
+  }
+  return parseSimilarityFromText(String(r.description ?? r.remark ?? ''))
+}
+
+/** @param {number | null} sim */
+export function formatAuditSimilarity(sim) {
+  if (sim == null || Number.isNaN(Number(sim))) return '—'
+  return formatSimilarity(sim)
+}
+
+/**
+ * 从作品描述 + 审核日志合并查重上下文
+ * @param {Record<string, unknown>} workRow
+ * @param {Record<string, unknown>[]} logs
+ */
+export function buildAuditCompareContext(workRow, logs) {
+  let similarity = pickSimilarityValue(workRow)
+  let matchWorkId = pickMatchWorkId(workRow)
+  let trigger = 'pending'
+  const reportCount = Number(
+    /** @type {Record<string, unknown>} */ (workRow).reportCount ?? 0,
+  )
+  if (reportCount > 0) trigger = 'report'
+
+  for (const log of logs) {
+    if (!log || typeof log !== 'object') continue
+    const l = /** @type {Record<string, unknown>} */ (log)
+    const sim = pickSimilarityValue(l)
+    const mid = pickMatchWorkId(l)
+    if (sim != null) similarity = sim
+    if (mid) matchWorkId = mid
+    const act = String(l.action ?? '').toLowerCase()
+    if (act === 'auto_mark') trigger = 'similarity'
+    if (act === 'report') trigger = 'report'
+  }
+
+  if (similarity != null && similarity >= 85) trigger = 'similarity'
+
+  return {
+    similarity,
+    matchWorkId,
+    trigger,
+    similarityLabel: formatAuditSimilarity(similarity),
+  }
+}
+
+/** @param {string} trigger */
+export function auditTriggerLabel(trigger) {
+  const k = String(trigger ?? '').trim()
+  if (k === 'similarity') return '高相似度待审'
+  if (k === 'report') return '举报待审'
+  if (k === 'history') return '历史记录'
+  return '待审核'
 }

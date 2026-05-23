@@ -107,3 +107,68 @@
   opacity: 0.35;
   cursor: not-allowed;
 }
+
+/* 主导航 / 功能主标签：图标容器 */
+.bccr-tab-ic-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.65rem;
+  height: 1.65rem;
+  border-radius: 0.45rem;
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--bccr-muted);
+  flex-shrink: 0;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.main-tab:hover .bccr-tab-ic-wrap,
+.tab:hover .bccr-tab-ic-wrap,
+.sub-tab:hover .bccr-tab-ic-wrap {
+  color: var(--bccr-text);
+  background: rgba(148, 163, 184, 0.22);
+}
+
+.main-tab.active .bccr-tab-ic-wrap,
+.tab.active .bccr-tab-ic-wrap {
+  background: rgba(255, 255, 255, 0.28);
+  color: inherit;
+  transform: scale(1.04);
+}
+
+.sub-tab .bccr-tab-ic-wrap {
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 0.38rem;
+}
+
+.sub-tab.active .bccr-tab-ic-wrap {
+  background: rgba(59, 130, 246, 0.18);
+  color: var(--bccr-accent-text, var(--bccr-accent));
+}
+
+.nav-item .bccr-tab-ic-wrap {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.5rem;
+}
+
+.nav-item.active .bccr-tab-ic-wrap {
+  background: rgba(37, 99, 235, 0.16);
+  color: var(--bccr-accent-text);
+}
+
+.type-pill .bccr-tab-ic-wrap {
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 0.38rem;
+  background: transparent;
+}
+
+.type-pill.on .bccr-tab-ic-wrap {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--bccr-option-active-text);
+}

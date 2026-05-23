@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import BccrIcon from '@/components/icons/BccrIcon.vue'
 import { navItemsForUser } from '@/config/nav'
 import { formatRoleLabels } from '@/lib/roles'
 import * as userApi from '@/api/user'
@@ -159,7 +160,10 @@ function isNavActive(to) {
             class="nav-item"
             :class="{ active: isNavActive(item.to) }"
           >
-            {{ item.label }}
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon :name="item.icon" size="md" />
+            </span>
+            <span class="nav-item-label">{{ item.label }}</span>
           </RouterLink>
         </nav>
       </aside>
@@ -308,12 +312,20 @@ function isNavActive(to) {
 }
 
 .nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
   padding: 0.55rem 0.75rem;
   border-radius: 0.45rem;
   font-size: 0.9rem;
   color: var(--bccr-muted);
   text-decoration: none;
   transition: background 0.12s, color 0.12s;
+}
+
+.nav-item-label {
+  min-width: 0;
+  line-height: 1.25;
 }
 
 .nav-item:hover {

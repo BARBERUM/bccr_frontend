@@ -1,15 +1,12 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import BccrIcon from '@/components/icons/BccrIcon.vue'
 import { normalizeMediaSrc } from '@/api/client'
 import * as authApi from '@/api/authorization'
 import * as userApi from '@/api/user'
-import {
-  fetchMyWorkList,
-  fetchWorkDetail,
-  formatWorkSummary,
-  normalizeListPage,
-} from '@/api/work'
+import { fetchWorkDetail, formatWorkSummary } from '@/api/work'
+import { fetchMyWorkPickSuggestions } from '@/lib/workPick'
 import {
   canExtendAuthAsGrantor,
   canExtendOutgoingRecord,
@@ -444,16 +441,11 @@ async function fetchWorkSuggestions(keyword) {
   workSuggestions.value = []
   workSearchError.value = ''
   try {
-    const data = await fetchMyWorkList({
-      keyword: kw,
-      workName: kw,
-      page: 1,
-      size: 24,
+    workSuggestions.value = await fetchMyWorkPickSuggestions({
+      query: kw,
+      myAddress: blockchainFromUser.value,
+      pageSize: 50,
     })
-    const page = normalizeListPage(data)
-    workSuggestions.value = page.items.map((row) =>
-      formatWorkSummary(/** @type {Record<string, unknown>} */ (row)),
-    )
   } catch (e) {
     workSearchError.value = e?.message || '作品搜索失败'
     workSuggestions.value = []
@@ -974,7 +966,9 @@ async function confirmRevoke() {
             :aria-selected="mainTab === 'grant'"
             @click="mainTab = 'grant'"
           >
-            <span class="main-tab-ic" aria-hidden="true">✦</span>
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="grant" size="sm" />
+            </span>
             发起授权
           </button>
           <button
@@ -985,7 +979,9 @@ async function confirmRevoke() {
             :aria-selected="mainTab === 'records'"
             @click="mainTab = 'records'"
           >
-            <span class="main-tab-ic" aria-hidden="true">☰</span>
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="auth-records" size="sm" />
+            </span>
             授权记录
           </button>
         </div>
@@ -1008,7 +1004,7 @@ async function confirmRevoke() {
                   v-model="grantWorkSearchInput"
                   type="text"
                   class="inp combo-inp"
-                  placeholder="输入作品名称关键字…"
+                  placeholder="作品名称关键字或作品 ID…"
                   autocomplete="off"
                   role="combobox"
                   :aria-expanded="workSuggestOpen"
@@ -1316,6 +1312,9 @@ async function confirmRevoke() {
             :class="{ active: recordTab === 'out' }"
             @click="recordTab = 'out'"
           >
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="send" size="sm" />
+            </span>
             我发出的
           </button>
           <button
@@ -1324,6 +1323,9 @@ async function confirmRevoke() {
             :class="{ active: recordTab === 'in' }"
             @click="recordTab = 'in'"
           >
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="receive" size="sm" />
+            </span>
             我收到的
           </button>
           <button
@@ -1332,6 +1334,9 @@ async function confirmRevoke() {
             :class="{ active: recordTab === 'work' }"
             @click="recordTab = 'work'"
           >
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="work-id" size="sm" />
+            </span>
             按作品 ID
           </button>
           <button
@@ -1340,6 +1345,9 @@ async function confirmRevoke() {
             :class="{ active: recordTab === 'id' }"
             @click="recordTab = 'id'"
           >
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="id-card" size="sm" />
+            </span>
             按记录 ID
           </button>
         </div>
@@ -1995,11 +2003,6 @@ async function confirmRevoke() {
   box-shadow: 0 4px 22px rgba(245, 158, 11, 0.22);
 }
 
-.main-tab-ic {
-  opacity: 0.88;
-  font-size: 0.85rem;
-}
-
 .card {
   padding: 1.4rem 1.45rem;
   border-radius: 1.05rem;
@@ -2295,6 +2298,9 @@ async function confirmRevoke() {
 }
 
 .sub-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   padding: 0.42rem 0.82rem;
   border-radius: 0.5rem;
   border: 1px solid rgba(148, 163, 184, 0.18);

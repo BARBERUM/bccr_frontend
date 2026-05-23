@@ -1,19 +1,33 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import AuditComparePanel from '@/components/audit/AuditComparePanel.vue'
+import BccrIcon from '@/components/icons/BccrIcon.vue'
 import * as auditApi from '@/api/audit'
 import * as userApi from '@/api/user'
-import { normalizeWorkIdParam } from '@/api/work'
 import {
+  fetchWorkDetail,
+  fetchWorkOnChainByFingerprint,
+  formatWorkDetail,
+  normalizeWorkIdParam,
+} from '@/api/work'
+import {
+  buildAuditCompareContext,
   formatAuditHistoryBadge,
+  formatAuditSimilarity,
   formatAuditStatus,
   pickAuditCaseId,
   pickAuditLogAddress,
   pickAuditOperator,
   pickAuditRemark,
+  normalizeOnChainRecord,
+  pickMatchWorkId,
   pickReasonRaw,
   pickReporter,
+  pickSimilarityValue,
   pickWorkAuthorLabel,
+  pickWorkBlockTime,
+  pickWorkFingerprint,
   pickWorkId,
   pickWorkTitle,
   reasonCodeLabel,
@@ -47,19 +61,193 @@ const historyProfileByAddress = ref(
   /** @type {Record<string, Record<string, unknown>>} */ ({}),
 )
 
-/** @type {import('vue').Ref<{ type: 'approve' | 'reject'; row: Record<string, unknown> } | null>} */
-const pendingAction = ref(null)
 const actionNote = ref('')
 const actionSubmitting = ref(false)
 
-const hasPendingAction = computed(() => pendingAction.value != null)
+/** @type {import('vue').Ref<Record<string, unknown> | null>} */
+const selectedRow = ref(null)
+const detailLoading = ref(false)
+/** @type {import('vue').Ref<ReturnType<typeof formatWorkDetail> | null>} */
+const subjectDetail = ref(null)
+/** @type {import('vue').Ref<ReturnType<typeof formatWorkDetail> | null>} */
+const matchDetail = ref(null)
+/** @type {import('vue').Ref<Record<string, unknown> | null>} */
+const compareContext = ref(null)
+/** @type {import('vue').Ref<Record<string, unknown> | null>} */
+const onChainSubject = ref(null)
+/** @type {import('vue').Ref<Record<string, unknown> | null>} */
+const onChainMatch = ref(null)
+
+const currentList = computed(() =>
+  mainTab.value === 'pending' ? pendingList.value : historyList.value,
+)
+
+/** @param {Record<string, unknown>} row */
+function auditRowKey(row) {
+  const wid = pickWorkId(row)
+  const cid = pickAuditCaseId(row)
+  return wid ? `w:${wid}` : cid ? `c:${cid}` : ''
+}
+
+const selectedKey = computed(() =>
+  selectedRow.value ? auditRowKey(selectedRow.value) : '',
+)
+
+const selectedIndex = computed(() => {
+  if (!selectedKey.value) return -1
+  return currentList.value.findIndex((r) => auditRowKey(r) === selectedKey.value)
+})
+
+const hasDetail = computed(() => Boolean(selectedRow.value))
+const detailReadonly = computed(() => mainTab.value === 'history')
+const hasQueueNext = computed(() => {
+  if (mainTab.value !== 'pending') return false
+  const i = selectedIndex.value
+  return i >= 0 && i < pendingList.value.length - 1
+})
+const hasQueuePrev = computed(() => {
+  if (mainTab.value !== 'pending') return false
+  return selectedIndex.value > 0
+})
+
+const detailCompareContext = computed(() => {
+  if (compareContext.value) return compareContext.value
+  const row = selectedRow.value
+  if (!row) return null
+  const sim = pickSimilarityValue(row)
+  const mid = pickMatchWorkId(row)
+  return {
+    similarity: sim,
+    matchWorkId: mid,
+    trigger: mainTab.value === 'history' ? 'history' : 'pending',
+    similarityLabel: formatAuditSimilarity(sim),
+  }
+})
 
 watch(mainTab, (t) => {
   listError.value = ''
+  selectedRow.value = null
+  clearDetailPayload()
   if (t === 'history') {
     loadHistory()
+  } else {
+    loadPending()
   }
 })
+
+function clearDetailPayload() {
+  subjectDetail.value = null
+  matchDetail.value = null
+  compareContext.value = null
+  onChainSubject.value = null
+  onChainMatch.value = null
+}
+
+/** @param {Record<string, unknown>} row */
+async function loadDetailForRow(row) {
+  const workId = normalizeWorkIdParam(pickWorkId(row))
+  if (!workId) {
+    listError.value = '该行缺少业务作品 ID，无法加载比对详情'
+    clearDetailPayload()
+    return
+  }
+  detailLoading.value = true
+  listError.value = ''
+  clearDetailPayload()
+  try {
+    const raw = await fetchWorkDetail(workId)
+    const rawObj =
+      raw && typeof raw === 'object'
+        ? /** @type {Record<string, unknown>} */ (raw)
+        : {}
+    subjectDetail.value = formatWorkDetail(rawObj)
+
+    const fp = pickWorkFingerprint(rawObj) || subjectDetail.value.fingerprint
+    if (fp) {
+      try {
+        const chain = await fetchWorkOnChainByFingerprint(fp)
+        onChainSubject.value =
+          chain && typeof chain === 'object'
+            ? normalizeOnChainRecord(chain)
+            : null
+      } catch {
+        onChainSubject.value = null
+      }
+    }
+
+    let logs = []
+    try {
+      const logData = await auditApi.fetchWorkAuditLogs(workId)
+      logs = auditApi.normalizeAuditList(logData)
+    } catch {
+      logs = []
+    }
+    compareContext.value = buildAuditCompareContext(rawObj, logs)
+
+    const matchId = normalizeWorkIdParam(
+      compareContext.value?.matchWorkId ?? pickMatchWorkId(row),
+    )
+    if (matchId) {
+      try {
+        const matchRaw = await fetchWorkDetail(matchId)
+        const matchObj =
+          matchRaw && typeof matchRaw === 'object'
+            ? /** @type {Record<string, unknown>} */ (matchRaw)
+            : {}
+        matchDetail.value = formatWorkDetail(matchObj)
+        const mfp = pickWorkFingerprint(matchObj) || matchDetail.value.fingerprint
+        if (mfp) {
+          try {
+            const chainM = await fetchWorkOnChainByFingerprint(mfp)
+            onChainMatch.value =
+              chainM && typeof chainM === 'object'
+                ? normalizeOnChainRecord(chainM)
+                : null
+          } catch {
+            onChainMatch.value = null
+          }
+        }
+      } catch {
+        matchDetail.value = null
+        onChainMatch.value = null
+      }
+    }
+  } catch (e) {
+    listError.value = e?.message || '加载作品比对资料失败'
+    clearDetailPayload()
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+/** @param {Record<string, unknown>} row */
+async function selectDetail(row) {
+  selectedRow.value = row
+  actionNote.value = ''
+  await loadDetailForRow(row)
+}
+
+function closeDetail() {
+  selectedRow.value = null
+  actionNote.value = ''
+  clearDetailPayload()
+}
+
+/** @param {number} delta */
+async function stepQueue(delta) {
+  const list = pendingList.value
+  const i = selectedIndex.value
+  const next = list[i + delta]
+  if (next) await selectDetail(next)
+}
+
+async function goQueueNext() {
+  await stepQueue(1)
+}
+
+async function goQueuePrev() {
+  await stepQueue(-1)
+}
 
 function formatTime(v) {
   if (v == null || v === '') return '—'
@@ -82,41 +270,35 @@ function goSimilarityRecordsForWork(id) {
   router.push({ name: 'check', query: { workId: w } })
 }
 
-function openApprove(row) {
-  pendingAction.value = { type: 'approve', row }
-  actionNote.value = ''
-}
-
-function openReject(row) {
-  pendingAction.value = { type: 'reject', row }
-  actionNote.value = ''
-}
-
-function cancelAction() {
-  pendingAction.value = null
-  actionNote.value = ''
-}
-
-async function confirmAction() {
-  const ctx = pendingAction.value
-  if (!ctx) return
-  const workId = normalizeWorkIdParam(pickWorkId(ctx.row))
+/** @param {'approve' | 'reject'} type */
+async function submitAudit(type) {
+  const row = selectedRow.value
+  if (!row || detailReadonly.value) return
+  const workId = normalizeWorkIdParam(pickWorkId(row))
   if (!workId) {
-    listError.value = '缺少业务作品 ID（如 work-…），无法提交审核。请确认待办数据里包含作品编号。'
+    listError.value = '缺少业务作品 ID（如 work-…），无法提交审核。'
     return
   }
   actionSubmitting.value = true
   listError.value = ''
+  const note = actionNote.value.trim()
+  const body = note ? { remark: note } : {}
   try {
-    const note = actionNote.value.trim()
-    if (ctx.type === 'approve') {
-      await auditApi.approveAuditCase(workId, note ? { remark: note } : {})
+    if (type === 'approve') {
+      await auditApi.approveAuditCase(workId, body)
     } else {
-      await auditApi.rejectAuditCase(workId, note ? { remark: note } : {})
+      await auditApi.rejectAuditCase(workId, body)
     }
-    cancelAction()
+    actionNote.value = ''
+    const prevIdx = selectedIndex.value
     await loadPending()
-    if (mainTab.value === 'history') await loadHistory()
+    const list = pendingList.value
+    if (!list.length) {
+      closeDetail()
+      return
+    }
+    const nextIdx = Math.min(Math.max(0, prevIdx), list.length - 1)
+    await selectDetail(list[nextIdx])
   } catch (e) {
     listError.value = e?.message || '操作失败'
   } finally {
@@ -127,12 +309,27 @@ async function confirmAction() {
 async function loadPending() {
   listLoading.value = true
   listError.value = ''
+  const prevKey = selectedKey.value
   try {
     const data = await auditApi.fetchPendingAuditQueue()
     pendingList.value = auditApi.normalizeAuditList(data)
+    if (mainTab.value !== 'pending') return
+    if (!pendingList.value.length) {
+      closeDetail()
+      return
+    }
+    const keep = prevKey
+      ? pendingList.value.find((r) => auditRowKey(r) === prevKey)
+      : null
+    if (keep) {
+      await selectDetail(keep)
+    } else if (!selectedRow.value) {
+      await selectDetail(pendingList.value[0])
+    }
   } catch (e) {
     listError.value = e?.message || '加载待办失败'
     pendingList.value = []
+    closeDetail()
   } finally {
     listLoading.value = false
   }
@@ -245,6 +442,7 @@ function historyNext() {
 async function loadHistory() {
   listLoading.value = true
   listError.value = ''
+  const prevKey = selectedKey.value
   try {
     if (historyWorkFullMode.value) {
       const wid = historyWorkIdFilter.value.trim()
@@ -260,6 +458,7 @@ async function loadHistory() {
       historyTotal.value = historyList.value.length
       historyPages.value = 1
       await hydrateHistoryOperatorProfiles(historyList.value)
+      await restoreHistorySelection(prevKey)
       return
     }
     const data = await auditApi.fetchAuditLogs({
@@ -275,13 +474,32 @@ async function loadHistory() {
     historyPage.value = norm.page
     historySize.value = norm.size
     await hydrateHistoryOperatorProfiles(historyList.value)
+    await restoreHistorySelection(prevKey)
   } catch (e) {
     listError.value = e?.message || '加载记录失败'
     historyList.value = []
     historyTotal.value = 0
     historyPages.value = 0
+    closeDetail()
   } finally {
     listLoading.value = false
+  }
+}
+
+/** @param {string} prevKey */
+async function restoreHistorySelection(prevKey) {
+  if (mainTab.value !== 'history') return
+  if (!historyList.value.length) {
+    closeDetail()
+    return
+  }
+  const keep = prevKey
+    ? historyList.value.find((r) => auditRowKey(r) === prevKey)
+    : null
+  if (keep) {
+    await selectDetail(keep)
+  } else if (!selectedRow.value) {
+    await selectDetail(historyList.value[0])
   }
 }
 
@@ -295,7 +513,7 @@ loadPending()
         <div class="hero-aura" aria-hidden="true" />
         <h1 class="title">审核工作台</h1>
         <p class="lead">
-          处理待办举报与审核单，核对作品信息后作出通过或驳回决定；操作将提交至后端与链上流程（以实际接口为准）。
+          左侧选择待审作品，右侧查看双图比对、查重相似度与链上指纹；处理完成后可「下一项」继续队列，亦可在处理记录中回看详情。
         </p>
         <div class="tabs" role="tablist" aria-label="审核分区">
           <button
@@ -306,7 +524,9 @@ loadPending()
             :aria-selected="mainTab === 'pending'"
             @click="mainTab = 'pending'"
           >
-            <span class="tab-ic" aria-hidden="true">◇</span>
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="pending" size="sm" />
+            </span>
             待处理
           </button>
           <button
@@ -317,7 +537,9 @@ loadPending()
             :aria-selected="mainTab === 'history'"
             @click="mainTab = 'history'"
           >
-            <span class="tab-ic" aria-hidden="true">☰</span>
+            <span class="bccr-tab-ic-wrap" aria-hidden="true">
+              <BccrIcon name="history" size="sm" />
+            </span>
             处理记录
           </button>
         </div>
@@ -325,292 +547,288 @@ loadPending()
 
       <p v-if="listError" class="banner-err">{{ listError }}</p>
 
-      <section v-show="mainTab === 'pending'" class="panel">
-        <div class="panel-head">
-          <h2 class="h2">待办队列</h2>
-          <button type="button" class="btn-ghost" :disabled="listLoading" @click="loadPending">
-            {{ listLoading ? '刷新中…' : '刷新' }}
-          </button>
-        </div>
-        <p v-if="listLoading && !pendingList.length" class="empty">
-          <span class="empty-ic" aria-hidden="true">⟳</span>
-          正在加载待办…
-        </p>
-        <p v-else-if="!listLoading && !pendingList.length" class="empty">
-          <span class="empty-ic" aria-hidden="true">✓</span>
-          当前没有待处理项，或后端尚未返回数据。
-        </p>
-        <ul v-else class="case-list">
-          <li
-            v-for="row in pendingList"
-            :key="pickAuditCaseId(row) || pickWorkId(row)"
-            class="case-card"
-          >
-            <div class="case-top">
-              <span
-                class="pill-status"
-                :class="`tone-${formatAuditStatus(row.status ?? row.state).tone}`"
-              >
-                {{ formatAuditStatus(row.status ?? row.state).label }}
-              </span>
-              <span class="case-id mono">{{ pickAuditCaseId(row) || '—' }}</span>
-            </div>
-            <h3 class="case-title">
-              {{ pickWorkTitle(row) || '未命名作品' }}
-            </h3>
-            <div class="case-meta">
-              <span class="meta-k">作品 ID</span>
-              <button
-                v-if="pickWorkId(row)"
-                type="button"
-                class="link-work mono"
-                @click="goWork(pickWorkId(row))"
-              >
-                {{ pickWorkId(row) }}
-              </button>
-              <span v-else class="meta-v muted">—</span>
-            </div>
-            <div class="case-meta">
-              <span class="meta-k">举报人</span>
-              <span class="meta-v mono" :title="pickReporter(row)">{{
-                shortAddr(pickReporter(row), 10, 8)
-              }}</span>
-            </div>
-            <div class="case-meta">
-              <span class="meta-k">时间</span>
-              <span class="meta-v">{{
-                formatTime(row.createdAt ?? row.reportTime ?? row.gmtCreate)
-              }}</span>
-            </div>
-            <div class="reason-block">
-              <span class="reason-label">事由</span>
-              <div class="reason-body">
-                <span class="reason-code">{{ reasonCodeLabel(splitReasonDisplay(pickReasonRaw(row)).code) }}</span>
-                <p v-if="splitReasonDisplay(pickReasonRaw(row)).detail" class="reason-detail">
-                  {{ splitReasonDisplay(pickReasonRaw(row)).detail }}
-                </p>
-                <p v-else-if="pickReasonRaw(row)" class="reason-raw mono">
-                  {{ pickReasonRaw(row) }}
-                </p>
-              </div>
-            </div>
-            <div class="case-actions">
-              <button
-                type="button"
-                class="btn-pass"
-                :disabled="actionSubmitting"
-                @click="openApprove(row)"
-              >
-                通过
-              </button>
-              <button
-                type="button"
-                class="btn-deny"
-                :disabled="actionSubmitting"
-                @click="openReject(row)"
-              >
-                驳回
-              </button>
-            </div>
-          </li>
-        </ul>
-      </section>
-
-      <section v-show="mainTab === 'history'" class="panel panel--muted">
-        <div class="panel-head panel-head--split">
-          <div>
-            <h2 class="h2">处理记录</h2>
-            <p class="panel-sub">作品名称、作者与处理结果；作品编号可跳转详情。</p>
-          </div>
-          <button type="button" class="btn-ghost" :disabled="listLoading" @click="loadHistory">
-            {{ listLoading ? '加载中…' : '刷新' }}
-          </button>
-        </div>
-        <div class="hist-toolbar">
-          <div class="hist-filters">
-            <label class="hist-field">
-              <span class="hist-label">操作</span>
-              <select v-model="historyAction" class="hist-input" @change="applyHistoryFilters">
-                <option value="">全部</option>
-                <option value="approve">通过</option>
-                <option value="reject">驳回</option>
-              </select>
-            </label>
-            <label class="hist-field hist-field--grow">
-              <span class="hist-label">作品 ID</span>
-              <input
-                v-model.trim="historyWorkIdFilter"
-                type="text"
-                class="hist-input"
-                placeholder="可选，筛选某作品"
-                @keyup.enter="applyHistoryFilters"
-              />
-            </label>
-            <label class="hist-field">
-              <span class="hist-label">每页</span>
-              <select v-model.number="historySize" class="hist-input" @change="applyHistoryFilters">
-                <option :value="10">10</option>
-                <option :value="20">20</option>
-                <option :value="50">50</option>
-              </select>
-            </label>
-          </div>
-          <div class="hist-actions">
-            <button type="button" class="btn-ghost" :disabled="listLoading" @click="applyHistoryFilters">
-              应用筛选
-            </button>
+      <div class="audit-workspace">
+        <aside class="audit-list-pane panel" :class="{ 'panel--muted': mainTab === 'history' }">
+          <div class="panel-head">
+            <h2 class="h2">{{ mainTab === 'pending' ? '待审列表' : '记录列表' }}</h2>
             <button
-              type="button"
-              class="btn-ghost"
-              :disabled="listLoading || historyWorkFullMode"
-              @click="openWorkFullHistory"
-            >
-              该作品全部
-            </button>
-            <button
-              v-if="historyWorkFullMode"
               type="button"
               class="btn-ghost"
               :disabled="listLoading"
-              @click="backToPagedHistory"
+              @click="mainTab === 'pending' ? loadPending() : loadHistory()"
             >
-              返回分页
+              {{ listLoading ? '刷新中…' : '刷新' }}
             </button>
           </div>
-        </div>
-        <p v-if="historyWorkFullMode" class="hist-hint">
-          当前展示作品 <span class="mono">{{ historyWorkIdFilter }}</span> 的全部审核记录（共 {{ historyTotal }} 条）。
-        </p>
-        <div v-if="!historyWorkFullMode && historyTotal > 0" class="hist-pagination">
-          <span class="hist-page-meta">
-            第 {{ historyPage }} / {{ historyPages || 1 }} 页，共 {{ historyTotal }} 条
-          </span>
-          <div class="hist-page-btns">
-            <button type="button" class="btn-ghost btn-ghost--sm" :disabled="listLoading || historyPage <= 1" @click="historyPrev">
-              上一页
-            </button>
-            <button
-              type="button"
-              class="btn-ghost btn-ghost--sm"
-              :disabled="listLoading || historyPage >= (historyPages || 1)"
-              @click="historyNext"
-            >
-              下一页
-            </button>
-          </div>
-        </div>
-        <p v-if="listLoading && !historyList.length" class="empty empty--soft">
-          正在加载记录…
-        </p>
-        <p v-else-if="!listLoading && !historyList.length" class="empty empty--soft">
-          暂无记录。可调整筛选条件后重试。
-        </p>
-        <div v-else class="hist-rec-scroll bccr-scroll-slim">
-          <ul class="hist-rec-list">
-            <li
-              v-for="(row, idx) in historyList"
-              :key="`${pickAuditCaseId(row)}-${idx}-${historyRowTime(row)}`"
-              class="hist-rec"
-            >
-            <div class="hist-rec__head">
-              <span
-                class="hist-rec__badge"
-                :class="`tone-${formatAuditHistoryBadge(row).tone}`"
-              >
-                {{ formatAuditHistoryBadge(row).label }}
-              </span>
-              <time class="hist-rec__time" :datetime="String(historyRowTime(row) || '')">{{
-                formatTime(historyRowTime(row))
-              }}</time>
+
+          <template v-if="mainTab === 'history'">
+            <div class="hist-toolbar hist-toolbar--inset">
+              <div class="hist-filters">
+                <label class="hist-field">
+                  <span class="hist-label">操作</span>
+                  <select v-model="historyAction" class="hist-input" @change="applyHistoryFilters">
+                    <option value="">全部</option>
+                    <option value="approve">通过</option>
+                    <option value="reject">驳回</option>
+                  </select>
+                </label>
+                <label class="hist-field hist-field--grow">
+                  <span class="hist-label">作品 ID</span>
+                  <input
+                    v-model.trim="historyWorkIdFilter"
+                    type="text"
+                    class="hist-input"
+                    placeholder="可选"
+                    @keyup.enter="applyHistoryFilters"
+                  />
+                </label>
+                <label class="hist-field">
+                  <span class="hist-label">每页</span>
+                  <select v-model.number="historySize" class="hist-input" @change="applyHistoryFilters">
+                    <option :value="10">10</option>
+                    <option :value="20">20</option>
+                    <option :value="50">50</option>
+                  </select>
+                </label>
+              </div>
+              <div class="hist-actions">
+                <button type="button" class="btn-ghost btn-ghost--sm" @click="applyHistoryFilters">
+                  筛选
+                </button>
+                <button
+                  type="button"
+                  class="btn-ghost btn-ghost--sm"
+                  :disabled="listLoading || historyWorkFullMode"
+                  @click="openWorkFullHistory"
+                >
+                  作品全部
+                </button>
+                <button
+                  v-if="historyWorkFullMode"
+                  type="button"
+                  class="btn-ghost btn-ghost--sm"
+                  @click="backToPagedHistory"
+                >
+                  返回分页
+                </button>
+              </div>
+              <p v-if="historyWorkFullMode" class="hist-hint hist-hint--inset">
+                作品 {{ historyWorkIdFilter }} 的全部记录（{{ historyTotal }} 条）
+              </p>
             </div>
-            <h3 class="hist-rec__title">{{ historyWorkDisplayTitle(row) }}</h3>
-            <p class="hist-rec__author">
-              <span class="hist-rec__k">作者</span>
-              <span class="hist-rec__v">{{ pickWorkAuthorLabel(row) || '—' }}</span>
-            </p>
-            <div class="hist-rec__workid">
-              <span class="hist-rec__k">作品编号</span>
-              <button
-                v-if="pickWorkId(row)"
-                type="button"
-                class="hist-rec__id-btn mono"
-                @click="goWork(pickWorkId(row))"
-              >
-                {{ pickWorkId(row) }}
+            <div v-if="!historyWorkFullMode && historyTotal > 0" class="hist-pagination hist-pagination--compact">
+              <button type="button" class="btn-ghost btn-ghost--sm" :disabled="listLoading || historyPage <= 1" @click="historyPrev">
+                ‹
               </button>
-              <span v-else class="hist-rec__v muted">—</span>
+              <span class="hist-page-meta">{{ historyPage }}/{{ historyPages || 1 }}</span>
+              <button
+                type="button"
+                class="btn-ghost btn-ghost--sm"
+                :disabled="listLoading || historyPage >= (historyPages || 1)"
+                @click="historyNext"
+              >
+                ›
+              </button>
             </div>
-            <dl class="hist-rec__meta">
-              <div v-if="pickAuditCaseId(row)" class="hist-rec__meta-row">
-                <dt>关联单号</dt>
-                <dd class="mono">{{ pickAuditCaseId(row) }}</dd>
+          </template>
+
+          <p v-if="listLoading && !currentList.length" class="empty empty--compact">
+            正在加载…
+          </p>
+          <p v-else-if="!listLoading && !currentList.length" class="empty empty--compact">
+            {{ mainTab === 'pending' ? '暂无待审作品' : '暂无记录' }}
+          </p>
+          <ul v-else class="case-list case-list--dense">
+            <li
+              v-for="(row, idx) in currentList"
+              :key="`${auditRowKey(row)}-${idx}`"
+              class="case-card case-card--flat"
+              :class="{ 'case-card--active': auditRowKey(row) === selectedKey }"
+              role="button"
+              tabindex="0"
+              @click="selectDetail(row)"
+              @keydown.enter.prevent="selectDetail(row)"
+            >
+              <div class="case-top">
+                <span
+                  class="pill-status pill-status--sm"
+                  :class="`tone-${mainTab === 'history' ? formatAuditHistoryBadge(row).tone : formatAuditStatus(row.status ?? row.state).tone}`"
+                >
+                  {{
+                    mainTab === 'history'
+                      ? formatAuditHistoryBadge(row).label
+                      : formatAuditStatus(row.status ?? row.state).label
+                  }}
+                </span>
+                <span v-if="pickSimilarityValue(row) != null" class="case-sim">
+                  {{ formatAuditSimilarity(pickSimilarityValue(row)) }}
+                </span>
               </div>
-              <div v-if="pickAuditLogAddress(row) || pickAuditOperator(row)" class="hist-rec__meta-row">
-                <dt>处理人</dt>
-                <dd>{{ historyOperatorDisplay(row) }}</dd>
-              </div>
-            </dl>
-            <p v-if="pickAuditRemark(row)" class="hist-rec__remark">
-              <span class="hist-rec__remark-k">备注</span>
-              {{ pickAuditRemark(row) }}
-            </p>
+              <h3 class="case-title case-title--sm">
+                {{ pickWorkTitle(row) || historyWorkDisplayTitle(row) || '未命名作品' }}
+              </h3>
+              <p class="case-line mono">{{ pickWorkId(row) || '—' }}</p>
+              <p v-if="mainTab === 'pending'" class="case-line muted">
+                {{ reasonCodeLabel(splitReasonDisplay(pickReasonRaw(row)).code) }}
+              </p>
+              <p v-else class="case-line muted">
+                {{ formatTime(historyRowTime(row)) }}
+              </p>
             </li>
           </ul>
-        </div>
-      </section>
+        </aside>
 
-      <div
-        v-if="hasPendingAction"
-        class="action-dock"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="dock-title"
-        @click.self="!actionSubmitting && cancelAction()"
-      >
-        <div class="dock-inner" @click.stop>
-          <h3 id="dock-title" class="dock-title">
-            {{ pendingAction?.type === 'approve' ? '确认通过' : '确认驳回' }}
-          </h3>
-          <p class="dock-sub mono">
-            单号 {{ pickAuditCaseId(pendingAction?.row ?? {}) }} · 作品
-            {{ pickWorkId(pendingAction?.row ?? {}) || '—' }}
-          </p>
-          <div class="dock-extra">
-            <button
-              type="button"
-              class="btn-dock-link"
-              :disabled="!pickWorkId(pendingAction?.row ?? {})"
-              @click="goSimilarityRecordsForWork(pickWorkId(pendingAction?.row ?? {}))"
-            >
-              查看该作品相似度对比记录
-            </button>
-            <span v-if="!pickWorkId(pendingAction?.row ?? {})" class="dock-extra-hint">当前行无作品 ID</span>
+        <main class="audit-detail-pane panel">
+          <div v-if="!hasDetail" class="detail-empty">
+            <p class="detail-empty-title">选择左侧条目</p>
+            <p class="detail-empty-sub">
+              将展示待审作品与对比作品预览、查重相似度、指纹与上链时间等信息。
+            </p>
           </div>
-          <label class="dock-label">
-            <span>备注（可选）</span>
-            <textarea
-              v-model="actionNote"
-              class="dock-area"
-              rows="2"
-              placeholder="对内备注或对外说明，将随请求提交"
+
+          <template v-else>
+            <header class="detail-head">
+              <div class="detail-head-main">
+                <span
+                  class="pill-status"
+                  :class="`tone-${detailReadonly ? formatAuditHistoryBadge(selectedRow).tone : formatAuditStatus(selectedRow?.status ?? selectedRow?.state).tone}`"
+                >
+                  {{
+                    detailReadonly
+                      ? formatAuditHistoryBadge(selectedRow).label
+                      : formatAuditStatus(selectedRow?.status ?? selectedRow?.state).label
+                  }}
+                </span>
+                <h2 class="detail-title">
+                  {{ pickWorkTitle(selectedRow) || '未命名作品' }}
+                </h2>
+                <p class="detail-sub mono">
+                  {{ pickWorkId(selectedRow) || '—' }}
+                  <span v-if="pickAuditCaseId(selectedRow)">
+                    · 单号 {{ pickAuditCaseId(selectedRow) }}
+                  </span>
+                </p>
+              </div>
+              <div class="detail-nav">
+                <button
+                  v-if="mainTab === 'pending'"
+                  type="button"
+                  class="btn-ghost btn-ghost--sm"
+                  :disabled="!hasQueuePrev || detailLoading"
+                  @click="goQueuePrev"
+                >
+                  上一项
+                </button>
+                <button
+                  v-if="mainTab === 'pending'"
+                  type="button"
+                  class="btn-ghost btn-ghost--sm"
+                  :disabled="!hasQueueNext || detailLoading"
+                  @click="goQueueNext"
+                >
+                  下一项
+                </button>
+                <button type="button" class="btn-ghost btn-ghost--sm" @click="closeDetail">
+                  关闭
+                </button>
+              </div>
+            </header>
+
+            <div class="reason-block reason-block--detail" v-if="selectedRow">
+              <span class="reason-label">事由 / 备注</span>
+              <div class="reason-body">
+                <template v-if="mainTab === 'pending'">
+                  <span class="reason-code">{{
+                    reasonCodeLabel(splitReasonDisplay(pickReasonRaw(selectedRow)).code)
+                  }}</span>
+                  <p
+                    v-if="splitReasonDisplay(pickReasonRaw(selectedRow)).detail"
+                    class="reason-detail"
+                  >
+                    {{ splitReasonDisplay(pickReasonRaw(selectedRow)).detail }}
+                  </p>
+                </template>
+                <p v-if="pickAuditRemark(selectedRow)" class="reason-detail">
+                  {{ pickAuditRemark(selectedRow) }}
+                </p>
+                <p v-if="detailReadonly && historyOperatorDisplay(selectedRow)" class="reason-detail muted">
+                  处理人：{{ historyOperatorDisplay(selectedRow) }}
+                </p>
+              </div>
+            </div>
+
+            <AuditComparePanel
+              :subject-detail="subjectDetail"
+              :match-detail="matchDetail"
+              :compare-context="detailCompareContext"
+              :on-chain-subject="onChainSubject"
+              :on-chain-match="onChainMatch"
+              :loading="detailLoading"
+              :readonly="detailReadonly"
+              @open-work="goWork"
             />
-          </label>
-          <div class="dock-btns">
-            <button type="button" class="btn-cancel" :disabled="actionSubmitting" @click="cancelAction">
-              取消
-            </button>
-            <button
-              type="button"
-              class="btn-ok"
-              :class="{ danger: pendingAction?.type === 'reject' }"
-              :disabled="actionSubmitting"
-              @click="confirmAction"
-            >
-              {{ actionSubmitting ? '提交中…' : '确认提交' }}
-            </button>
-          </div>
-        </div>
+
+            <dl v-if="subjectDetail && !detailLoading" class="detail-extra-dl">
+              <div class="dl-row">
+                <dt>待审上链时间</dt>
+                <dd>{{
+                  formatTime(
+                    pickWorkBlockTime(subjectDetail.raw ?? subjectDetail) ||
+                      subjectDetail.createdAt,
+                  )
+                }}</dd>
+              </div>
+              <div v-if="matchDetail" class="dl-row">
+                <dt>对比上链时间</dt>
+                <dd>{{
+                  formatTime(
+                    pickWorkBlockTime(matchDetail.raw ?? matchDetail) || matchDetail.createdAt,
+                  )
+                }}</dd>
+              </div>
+            </dl>
+
+            <footer v-if="!detailReadonly" class="detail-foot">
+              <label class="dock-label">
+                <span>审核备注（可选）</span>
+                <textarea
+                  v-model="actionNote"
+                  class="dock-area"
+                  rows="2"
+                  placeholder="通过或驳回时一并提交"
+                />
+              </label>
+              <div class="detail-foot-btns">
+                <button
+                  type="button"
+                  class="btn-pass"
+                  :disabled="actionSubmitting || detailLoading"
+                  @click="submitAudit('approve')"
+                >
+                  {{ actionSubmitting ? '提交中…' : '通过' }}
+                </button>
+                <button
+                  type="button"
+                  class="btn-deny"
+                  :disabled="actionSubmitting || detailLoading"
+                  @click="submitAudit('reject')"
+                >
+                  驳回
+                </button>
+                <button
+                  type="button"
+                  class="btn-ghost"
+                  :disabled="!hasQueueNext || actionSubmitting"
+                  @click="goQueueNext"
+                >
+                  下一项
+                </button>
+              </div>
+            </footer>
+          </template>
+        </main>
       </div>
+
     </div>
   </div>
 </template>
@@ -626,8 +844,212 @@ loadPending()
 
 .audit-page {
   width: 100%;
-  max-width: 820px;
+  max-width: 1280px;
   position: relative;
+}
+
+.audit-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.audit-list-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 28rem;
+  max-height: calc(100vh - 12rem);
+}
+
+.audit-list-pane .case-list--dense {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+
+.audit-detail-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  min-height: 28rem;
+  max-height: calc(100vh - 12rem);
+  overflow-y: auto;
+}
+
+.detail-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem 1.5rem;
+  color: var(--bccr-muted);
+}
+
+.detail-empty-title {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+  font-weight: 650;
+  color: var(--bccr-text-secondary);
+}
+
+.detail-empty-sub {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  max-width: 22rem;
+}
+
+.detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.detail-title {
+  margin: 0.35rem 0 0.2rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.detail-sub {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--bccr-muted);
+}
+
+.detail-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.reason-block--detail {
+  margin: 0;
+}
+
+.detail-extra-dl {
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: var(--bccr-surface-muted);
+  display: grid;
+  gap: 0.35rem;
+}
+
+.detail-extra-dl .dl-row {
+  display: grid;
+  grid-template-columns: 6.5rem 1fr;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+}
+
+.detail-extra-dl dt {
+  color: var(--bccr-muted);
+  font-weight: 600;
+}
+
+.detail-extra-dl dd {
+  margin: 0;
+  color: var(--bccr-text);
+}
+
+.detail-foot {
+  margin-top: auto;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.detail-foot-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+}
+
+.case-card--flat {
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    background 0.12s,
+    box-shadow 0.12s;
+}
+
+.case-card--flat:hover {
+  border-color: rgba(244, 114, 182, 0.35);
+}
+
+.case-card--active {
+  border-color: rgba(244, 114, 182, 0.55);
+  background: linear-gradient(
+    155deg,
+    rgba(236, 72, 153, 0.1),
+    var(--bccr-surface-muted)
+  );
+  box-shadow: 0 0 0 1px rgba(244, 114, 182, 0.2);
+}
+
+.case-title--sm {
+  font-size: 0.9rem;
+  margin-bottom: 0.2rem;
+}
+
+.case-line {
+  margin: 0;
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
+.case-line.muted {
+  color: var(--bccr-muted);
+}
+
+.case-sim {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #be185d;
+}
+
+.empty--compact {
+  padding: 1.25rem 0.5rem;
+  font-size: 0.84rem;
+}
+
+.hist-toolbar--inset {
+  margin-bottom: 0.65rem;
+  padding: 0.5rem 0.55rem;
+}
+
+.hist-hint--inset {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+}
+
+.hist-pagination--compact {
+  margin-bottom: 0.5rem;
+  padding: 0;
+  background: transparent;
+  border: none;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+@media (max-width: 960px) {
+  .audit-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-list-pane,
+  .audit-detail-pane {
+    max-height: none;
+    min-height: 0;
+  }
 }
 
 .hero {
@@ -716,10 +1138,6 @@ loadPending()
   box-shadow: 0 4px 22px rgba(236, 72, 153, 0.18);
 }
 
-.tab-ic {
-  opacity: 0.88;
-  font-size: 0.82rem;
-}
 
 .banner-err {
   margin: 0 0 1rem;

@@ -5,6 +5,7 @@ import { fetchTextFromUrl } from '@/api/client'
 import * as reportApi from '@/api/report'
 import * as workApi from '@/api/work'
 import { useAuthStore } from '@/stores/auth'
+import WorkMediaPlayer from '@/components/work/WorkMediaPlayer.vue'
 import WorkInteractionPanel from '@/views/works/WorkInteractionPanel.vue'
 
 const route = useRoute()
@@ -53,6 +54,20 @@ const textSourceUrl = computed(() => {
   if (!d || d.kind !== 'text') return ''
   return d.filePath || d.fileUrl || ''
 })
+
+const mediaPlayUrl = computed(() => {
+  const d = detail.value
+  if (!d || (d.kind !== 'video' && d.kind !== 'audio')) return ''
+  return d.fileUrl || d.filePath || ''
+})
+
+const showVideoPlayer = computed(
+  () => detail.value?.kind === 'video' && Boolean(mediaPlayUrl.value),
+)
+
+const showAudioPlayer = computed(
+  () => detail.value?.kind === 'audio' && Boolean(mediaPlayUrl.value),
+)
 
 async function loadTextBody() {
   textBody.value = ''
@@ -375,6 +390,7 @@ const showHeroThumb = computed(() => {
   const d = detail.value
   if (!d) return false
   if (d.kind === 'image' && imageMainSrc.value) return false
+  if (d.kind === 'video' || d.kind === 'audio') return false
   return Boolean(d.cover)
 })
 
@@ -434,6 +450,30 @@ watch(isOwnWork, (own) => {
             <p v-else-if="detail.kind === 'image' && !imageMainSrc" class="warn-banner">
               当前作品为图像类型，但接口未返回可访问的图片地址，无法预览。
             </p>
+
+            <div v-else-if="detail.kind === 'video'" class="media-shell">
+              <WorkMediaPlayer
+                v-if="showVideoPlayer"
+                kind="video"
+                :src="mediaPlayUrl"
+                :title="detail.title"
+              />
+              <p v-else class="warn-banner">
+                当前作品为视频类型，但接口未返回可访问的文件地址，无法播放。
+              </p>
+            </div>
+
+            <div v-else-if="detail.kind === 'audio'" class="media-shell">
+              <WorkMediaPlayer
+                v-if="showAudioPlayer"
+                kind="audio"
+                :src="mediaPlayUrl"
+                :title="detail.title"
+              />
+              <p v-else class="warn-banner">
+                当前作品为音频类型，但接口未返回可访问的文件地址，无法播放。
+              </p>
+            </div>
 
             <div v-else-if="detail.kind === 'text'" class="text-panel-embed">
               <h3 class="ig-text-h">正文</h3>
@@ -851,6 +891,11 @@ watch(isOwnWork, (own) => {
   font-size: 3rem;
   font-weight: 800;
   color: var(--bccr-text-hint);
+}
+
+.media-ph-hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
 }
 
 .ig-rail {
